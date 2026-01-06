@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import MapView from "./MapView";
 import SelfieCamera from "./SelfieCamera";
 
+/* -------------------- IST time helper -------------------- */
 function istDateTimeParts(now = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kolkata",
@@ -21,6 +22,7 @@ function istDateTimeParts(now = new Date()) {
   };
 }
 
+/* -------------------- reverse geocode -------------------- */
 async function reverseGeocode(lat, lng) {
   const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`;
   const res = await fetch(url, { headers: { Accept: "application/json" } });
@@ -30,9 +32,15 @@ async function reverseGeocode(lat, lng) {
 }
 
 export default function AttendanceApp() {
-  // ✅ MUST be inside component
+  /* -------------------- camera -------------------- */
   const [cameraOpen, setCameraOpen] = useState(false);
 
+  /* -------------------- flow state -------------------- */
+  // null | "checkin" | "lunchStart" | "lunchEnd" | "checkout"
+  const [lastAction, setLastAction] = useState(null);
+  const [isTimeFrozen, setIsTimeFrozen] = useState(false);
+
+  /* -------------------- sample data -------------------- */
   const offices = useMemo(
     () => [
       { id: "ahm", name: "Ahmedabad Office" },
@@ -50,104 +58,147 @@ export default function AttendanceApp() {
     []
   );
 
+  /* -------------------- selections -------------------- */
   const [officeId, setOfficeId] = useState("");
   const [employeeId, setEmployeeId] = useState("");
+
+  // selected action (radio)
   const [type, setType] = useState("checkin");
 
+  /* -------------------- IST clock (freeze rules) -------------------- */
   const [dateStr, setDateStr] = useState("");
   const [timeStr, setTimeStr] = useState("");
 
+  useEffect(() => {
+    // if frozen, do not run realtime interval
+    if (isTimeFrozen) return;
+
+    const tick = () => {
+      const { date, time } = istDateTimeParts(new Date());
+      setDateStr(date);
+      setTimeStr(time);
+    };
+
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [isTimeFrozen]);
+
+  /* -------------------- location -------------------- */
   const [lat, setLat] = useState(null);
   const [lng, setLng] = useState(null);
   const [address, setAddress] = useState("");
   const [locErr, setLocErr] = useState("");
 
+  const getLocation = () => {
+    setLocErr("");
+
+    if (!("geolocation" in navigator)) {
+      setLocErr("Geolocation not supported");
+      return;
+    }
+
+    const opts = {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+    };
+
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const la = pos.coords.latitude;
+        const ln = pos.coords.longitude;
+
+        setLat(la);
+        setLng(ln);
+
+        try {
+          const a = await reverseGeocode(la, ln);
+          setAddress(a);
+        } catch {
+          setAddress("");
+        }
+      },
+      (err) => {
+        if (err.code === 1)
+          setLocErr("Location blocked. Please allow Location permission.");
+        else if (err.code === 2)
+          setLocErr("Location unavailable (turn on GPS).");
+        else setLocErr(err.message || "Location error");
+      },
+      opts
+    );
+  };
+
+  // Optional: keep updating lat/lng in background (good for accuracy)
+  useEffect(() => {
+    if (!("geolocation" in navigator)) return;
+
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        setLat(pos.coords.latitude);
+        setLng(pos.coords.longitude);
+      },
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 0 }
+    );
+
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, []);
+
+  // initial load: location + time snapshot
+  useEffect(() => {
+    getLocation();
+    const { date, time } = istDateTimeParts(new Date());
+    setDateStr(date);
+    setTimeStr(time);
+  }, []);
+
+  /* -------------------- selfie -------------------- */
   const [selfieFile, setSelfieFile] = useState(null);
   const selfiePreview = useMemo(() => {
     if (!selfieFile) return "";
     return URL.createObjectURL(selfieFile);
   }, [selfieFile]);
 
+  /* -------------------- employee list by office -------------------- */
   const filteredEmployees = useMemo(() => {
     if (!officeId) return [];
     return employees.filter((e) => e.officeId === officeId);
   }, [officeId, employees]);
 
+  /* -------------------- allowed actions rules -------------------- */
+  const allowedTypes = useMemo(() => {
+    if (!officeId || !employeeId) return [];
+
+    if (lastAction === null) return ["checkin"];
+    if (lastAction === "checkin") return ["lunchStart", "checkout"];
+    if (lastAction === "lunchStart") return ["lunchEnd", "checkout"];
+    if (lastAction === "lunchEnd") return ["checkout"];
+    return [];
+  }, [officeId, employeeId, lastAction]);
+
+  // whenever allowedTypes changes, ensure selected radio stays valid
   useEffect(() => {
-    const tick = () => {
-      const { date, time } = istDateTimeParts(new Date());
-      setDateStr(date);
-      setTimeStr(time);
-    };
-    tick();
-    const t = setInterval(tick, 1000);
-    return () => clearInterval(t);
-  }, []);
+    if (!officeId || !employeeId) return;
 
-  const getLocation = () => {
-  setLocErr("");
+    const first = allowedTypes[0] || "checkin";
+    if (!allowedTypes.includes(type)) setType(first);
+  }, [officeId, employeeId, allowedTypes, type]);
 
-  if (!("geolocation" in navigator)) {
-    setLocErr("Geolocation not supported");
-    return;
-  }
-
-  const opts = {
-    enableHighAccuracy: true,
-    timeout: 20000,
-    maximumAge: 0,
+  /* -------------------- FULL PAGE REFRESH -------------------- */
+  const onFullRefresh = () => {
+    window.location.reload();
   };
 
-  navigator.geolocation.getCurrentPosition(
-    async (pos) => {
-      const la = pos.coords.latitude;
-      const ln = pos.coords.longitude;
-
-      setLat(la);
-      setLng(ln);
-
-      try {
-        const a = await reverseGeocode(la, ln);
-        setAddress(a);
-      } catch {
-        setAddress("");
-      }
-    },
-    (err) => {
-      // Better error messages
-      if (err.code === 1) setLocErr("Location permission denied");
-      else if (err.code === 2) setLocErr("Location unavailable (turn on GPS)");
-      else if (err.code === 3) setLocErr("Timeout: move outside / try again");
-      else setLocErr(err.message || "Location error");
-    },
-    opts
-  );
-};
-
-useEffect(() => {
-  if (!("geolocation" in navigator)) return;
-
-  const watchId = navigator.geolocation.watchPosition(
-    (pos) => {
-      setLat(pos.coords.latitude);
-      setLng(pos.coords.longitude);
-    },
-    () => {},
-    { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
-  );
-
-  return () => navigator.geolocation.clearWatch(watchId);
-}, []);
-
-
-  useEffect(() => {
-    getLocation();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
+  /* -------------------- submit -------------------- */
   const onSubmit = async () => {
     if (!officeId) return alert("Please select office");
     if (!employeeId) return alert("Please select employee");
+
+    if (!allowedTypes.includes(type)) {
+      return alert("This action is not allowed now. Follow the order.");
+    }
+
     if (lat == null || lng == null) return alert("Location not available");
     if (!selfieFile) return alert("Please take selfie");
 
@@ -164,9 +215,13 @@ useEffect(() => {
     };
 
     console.log("Attendance payload:", payload);
-    alert("Attendance captured (check console). Now connect API.");
+    alert(`Saved: ${type}`);
+
+    setLastAction(type);
+    setSelfieFile(null);
   };
 
+  /* -------------------- UI -------------------- */
   return (
     <div className="page">
       <header className="topbar">
@@ -175,20 +230,40 @@ useEffect(() => {
           <div className="title">Amrita Global Enterprises</div>
         </div>
 
-        <button className="iconBtn" onClick={getLocation} title="Refresh">
+        <button
+          type="button"
+          className="iconBtn"
+          onClick={onFullRefresh}
+          title="Refresh"
+        >
           ⟳
         </button>
       </header>
 
       <div className="container">
+        {/* STEP 1: Office */}
         <div className="card">
           <label className="label">🏢 Select Office</label>
           <select
             className="input"
             value={officeId}
             onChange={(e) => {
-              setOfficeId(e.target.value);
+              const val = e.target.value;
+
+              setOfficeId(val);
               setEmployeeId("");
+              setLastAction(null);
+              setType("checkin");
+              setSelfieFile(null);
+
+              if (val) {
+                const { date, time } = istDateTimeParts(new Date());
+                setDateStr(date);
+                setTimeStr(time);
+                setIsTimeFrozen(true);
+              } else {
+                setIsTimeFrozen(false);
+              }
             }}
           >
             <option value="">Select Office</option>
@@ -200,71 +275,72 @@ useEffect(() => {
           </select>
         </div>
 
-        <div className="card">
-          <label className="label">👤 Select Employee</label>
-          <select
-            className="input"
-            value={employeeId}
-            onChange={(e) => setEmployeeId(e.target.value)}
-            disabled={!officeId}
-          >
-            <option value="">
-              {officeId ? "Select Employee" : "Select Office first"}
-            </option>
-            {filteredEmployees.map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        {/* STEP 2: Employee (only after office) */}
+        {officeId && (
+          <div className="card">
+            <label className="label">👤 Select Employee</label>
+            <select
+              className="input"
+              value={employeeId}
+              onChange={(e) => {
+                const val = e.target.value;
+                setEmployeeId(val);
 
-        <div className="card">
-          <label className="label">❗ Attendance Type</label>
-
-          <div className="radioRow">
-            <label className="radioItem">
-              <input
-                type="radio"
-                name="type"
-                checked={type === "checkin"}
-                onChange={() => setType("checkin")}
-              />
-              <span>Checkin</span>
-            </label>
-
-            <label className="radioItem">
-              <input
-                type="radio"
-                name="type"
-                checked={type === "checkout"}
-                onChange={() => setType("checkout")}
-              />
-              <span>Checkout</span>
-            </label>
-
-            <label className="radioItem">
-              <input
-                type="radio"
-                name="type"
-                checked={type === "lunchStart"}
-                onChange={() => setType("lunchStart")}
-              />
-              <span>Lunch Start</span>
-            </label>
-
-            <label className="radioItem">
-              <input
-                type="radio"
-                name="type"
-                checked={type === "lunchEnd"}
-                onChange={() => setType("lunchEnd")}
-              />
-              <span>Lunch End</span>
-            </label>
+                setLastAction(null);
+                setType("checkin");
+                setSelfieFile(null);
+              }}
+            >
+              <option value="">Select Employee</option>
+              {filteredEmployees.map((e) => (
+                <option key={e.id} value={e.id}>
+                  {e.name}
+                </option>
+              ))}
+            </select>
           </div>
-        </div>
+        )}
 
+        {/* STEP 3: Attendance Type (only after employee) */}
+        {officeId && employeeId && (
+          <div className="card">
+            <label className="label">❗ Attendance Type</label>
+
+            <div className="radioRow">
+              {[
+                { key: "checkin", label: "Checkin" },
+                { key: "checkout", label: "Checkout" },
+                { key: "lunchStart", label: "Lunch Start" },
+                { key: "lunchEnd", label: "Lunch End" },
+              ].map((opt) => {
+                const enabled = allowedTypes.includes(opt.key);
+
+                return (
+                  <label
+                    key={opt.key}
+                    className="radioItem"
+                    style={{ opacity: enabled ? 1 : 0.35 }}
+                  >
+                    <input
+                      type="radio"
+                      name="type"
+                      checked={type === opt.key}
+                      disabled={!enabled}
+                      onChange={() => setType(opt.key)}
+                    />
+                    <span>{opt.label}</span>
+                  </label>
+                );
+              })}
+            </div>
+
+            {allowedTypes.length === 0 && (
+              <div className="errorText">Attendance finished (Checkout done).</div>
+            )}
+          </div>
+        )}
+
+        {/* Date/Time/Location info */}
         <div className="card">
           <div className="infoLine">📅 Date: {dateStr}</div>
           <div className="infoLine">🕒 Time (IST): {timeStr}</div>
@@ -279,37 +355,45 @@ useEffect(() => {
           {locErr && <div className="errorText">{locErr}</div>}
         </div>
 
+        {/* Map */}
         <div className="card mapCard">
           <MapView lat={lat} lng={lng} />
         </div>
 
-        <div className="card">
-          <button
-            className="btn purple"
-            type="button"
-            onClick={() => setCameraOpen(true)}
-          >
-            📷 Take Selfie
-          </button>
+        {/* Selfie + Submit (only after employee + allowed action exists) */}
+        {officeId && employeeId && allowedTypes.length > 0 && (
+          <div className="card">
+            <button
+              className="btn purple"
+              type="button"
+              onClick={() => setCameraOpen(true)}
+            >
+              📷 Take Selfie
+            </button>
 
-          <SelfieCamera
-            open={cameraOpen}
-            onClose={() => setCameraOpen(false)}
-            onCapture={(file) => setSelfieFile(file)}
-          />
+            <SelfieCamera
+              open={cameraOpen}
+              onClose={() => setCameraOpen(false)}
+              onCapture={(file) => setSelfieFile(file)}
+            />
 
-          <div className="previewBox">
-            {selfiePreview ? (
-              <img className="previewImg" src={selfiePreview} alt="Selfie Preview" />
-            ) : (
-              <div className="placeholder">Selfie Preview</div>
-            )}
+            <div className="previewBox">
+              {selfiePreview ? (
+                <img
+                  className="previewImg"
+                  src={selfiePreview}
+                  alt="Selfie Preview"
+                />
+              ) : (
+                <div className="placeholder">Selfie Preview</div>
+              )}
+            </div>
+
+            <button className="btn green" onClick={onSubmit}>
+              ✅ Submit Attendance
+            </button>
           </div>
-
-          <button className="btn green" onClick={onSubmit}>
-            ✅ Submit Attendance
-          </button>
-        </div>
+        )}
       </div>
     </div>
   );
