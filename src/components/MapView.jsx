@@ -1,21 +1,22 @@
-import React from "react";
-import { MapContainer, TileLayer, Marker } from "react-leaflet";
+import React, { useMemo } from "react";
 
 export default function MapView({ lat, lng }) {
-  const center = lat != null && lng != null ? [lat, lng] : [23.0225, 72.5714];
+  const src = useMemo(() => {
+    const la = lat ?? 23.0225;
+    const ln = lng ?? 72.5714;
+    return `https://www.google.com/maps?q=${la},${ln}&z=16&output=embed`;
+  }, [lat, lng]);
 
   return (
-    <MapContainer
-      center={center}
-      zoom={15}
-      scrollWheelZoom={false}
-      style={{ height: 240, width: "100%", borderRadius: 14, overflow: "hidden" }}
-    >
-      <TileLayer
-        attribution="&copy; OpenStreetMap contributors"
-        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-      />
-      {lat != null && lng != null && <Marker position={[lat, lng]} />}
-    </MapContainer>
+    <iframe
+      title="Google Map"
+      src={src}
+      width="100%"
+      height="240"
+      style={{ border: 0, borderRadius: 14 }}
+      loading="lazy"
+      referrerPolicy="no-referrer-when-downgrade"
+      allowFullScreen
+    />
   );
 }

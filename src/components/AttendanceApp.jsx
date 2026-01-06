@@ -85,30 +85,60 @@ export default function AttendanceApp() {
   }, []);
 
   const getLocation = () => {
-    setLocErr("");
-    if (!("geolocation" in navigator)) {
-      setLocErr("Geolocation not supported");
-      return;
-    }
+  setLocErr("");
 
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const la = pos.coords.latitude;
-        const ln = pos.coords.longitude;
-        setLat(la);
-        setLng(ln);
+  if (!("geolocation" in navigator)) {
+    setLocErr("Geolocation not supported");
+    return;
+  }
 
-        try {
-          const a = await reverseGeocode(la, ln);
-          setAddress(a);
-        } catch {
-          setAddress("");
-        }
-      },
-      (err) => setLocErr(err?.message || "Location permission denied"),
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-    );
+  const opts = {
+    enableHighAccuracy: true,
+    timeout: 20000,
+    maximumAge: 0,
   };
+
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      const la = pos.coords.latitude;
+      const ln = pos.coords.longitude;
+
+      setLat(la);
+      setLng(ln);
+
+      try {
+        const a = await reverseGeocode(la, ln);
+        setAddress(a);
+      } catch {
+        setAddress("");
+      }
+    },
+    (err) => {
+      // Better error messages
+      if (err.code === 1) setLocErr("Location permission denied");
+      else if (err.code === 2) setLocErr("Location unavailable (turn on GPS)");
+      else if (err.code === 3) setLocErr("Timeout: move outside / try again");
+      else setLocErr(err.message || "Location error");
+    },
+    opts
+  );
+};
+
+useEffect(() => {
+  if (!("geolocation" in navigator)) return;
+
+  const watchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      setLat(pos.coords.latitude);
+      setLng(pos.coords.longitude);
+    },
+    () => {},
+    { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
+  );
+
+  return () => navigator.geolocation.clearWatch(watchId);
+}, []);
+
 
   useEffect(() => {
     getLocation();
