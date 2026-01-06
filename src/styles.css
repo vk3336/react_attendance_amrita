@@ -1,0 +1,141 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, Arial; background: #f2f5ff; }
+
+.page { min-height: 100vh; }
+.topbar {
+  background: #0ea5e9;
+  color: #fff;
+  padding: 16px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.brand { display: flex; align-items: center; gap: 10px; }
+.logoDot { width: 30px; height: 30px; border-radius: 50%; background: rgba(255,255,255,.3); }
+.title { font-size: 20px; font-weight: 700; letter-spacing: .2px; }
+
+.iconBtn {
+  width: 38px; height: 38px; border-radius: 12px;
+  border: none; background: rgba(255,255,255,.22); color: #fff;
+  font-size: 20px; cursor: pointer;
+}
+
+.container { max-width: 520px; margin: 0 auto; padding: 14px; display: grid; gap: 14px; }
+.card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 14px;
+  box-shadow: 0 10px 25px rgba(16, 24, 40, 0.08);
+}
+.label { display: block; font-weight: 700; margin-bottom: 8px; color: #111827; }
+.input {
+  width: 100%;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  outline: none;
+  font-size: 16px;
+}
+
+.radioRow { display: grid; gap: 10px; margin-top: 8px; }
+.radioItem { display: flex; gap: 10px; align-items: center; font-size: 16px; color: #111827; }
+
+.infoLine { margin: 6px 0; color: #111827; }
+.errorText { margin-top: 8px; color: #dc2626; font-weight: 600; }
+
+.btn {
+  width: 100%;
+  padding: 12px 14px;
+  border: none;
+  border-radius: 14px;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.btn.purple { background: #6d28d9; color: #fff; }
+.btn.green { background: #16a34a; color: #fff; margin-top: 12px; }
+
+.previewBox {
+  margin-top: 12px;
+  border-radius: 14px;
+  background: #f3f4f6;
+  height: 240px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+.previewImg { width: 100%; height: 100%; object-fit: cover; }
+.placeholder { color: #6b7280; font-weight: 700; }
+.mapCard { padding: 10px; }
+
+.logoImg{
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  object-fit: cover;
+  background: rgba(255,255,255,.25);
+  border: 2px solid rgba(255,255,255,.35);
+}
+.camOverlay{
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+  display: grid;
+  place-items: center;
+  z-index: 9999;
+  padding: 14px;
+}
+
+.camModal{
+  width: min(520px, 100%);
+  background: #fff;
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow: 0 18px 50px rgba(0,0,0,.25);
+}
+
+.camHeader{
+  display:flex;
+  align-items:center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: #0ea5e9;
+  color:#fff;
+}
+
+.camTitle{ font-weight: 800; }
+.camX{
+  border:none;
+  background: rgba(255,255,255,.2);
+  color:#fff;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 18px;
+}
+
+.camBody{ padding: 12px; }
+.camBox{
+  width: 100%;
+  background: #111827;
+  border-radius: 14px;
+  overflow:hidden;
+}
+
+.camVideo{
+  width: 100%;
+  height: 360px;
+  object-fit: cover;
+  display:block;
+}
+
+.camHint{ margin-top: 10px; color:#374151; font-weight: 700; }
+.camError{ margin-top: 10px; color:#dc2626; font-weight: 800; }
+
+.camFooter{
+  display:flex;
+  gap: 10px;
+  padding: 12px;
+}
+.camFooter .btn{ flex: 1; }
