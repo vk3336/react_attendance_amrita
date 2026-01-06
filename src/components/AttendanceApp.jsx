@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import MapView from "./MapView";
 import SelfieCamera from "./SelfieCamera";
 
-/* -------------------- IST time helper -------------------- */
+/* -------------------- IST time helper (format only) -------------------- */
 function istDateTimeParts(now = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kolkata",
@@ -36,9 +36,43 @@ export default function AttendanceApp() {
   const [cameraOpen, setCameraOpen] = useState(false);
 
   /* -------------------- flow state -------------------- */
-  // null | "checkin" | "lunchStart" | "lunchEnd" | "checkout"
   const [lastAction, setLastAction] = useState(null);
   const [isTimeFrozen, setIsTimeFrozen] = useState(false);
+
+  /* -------------------- TRUSTED TIME (server sync offset) -------------------- */
+  // offsetMs = (trusted_now_ms - device_now_ms)
+  const [timeOffsetMs, setTimeOffsetMs] = useState(0);
+  const [timeErr, setTimeErr] = useState("");
+
+  const trustedNow = () => new Date(Date.now() + timeOffsetMs);
+
+  const syncIstTime = async () => {
+    try {
+      setTimeErr("");
+      const t0 = Date.now();
+
+      // Public time API (Asia/Kolkata)
+      const res = await fetch("https://worldtimeapi.org/api/timezone/Asia/Kolkata", {
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) throw new Error("Time sync failed");
+
+      const data = await res.json();
+      const t1 = Date.now();
+
+      // data.datetime is ISO string with correct time
+      const serverMs = new Date(data.datetime).getTime();
+
+      // compensate network delay (very simple RTT/2)
+      const rtt = t1 - t0;
+      const estimatedServerNowAtT1 = serverMs + Math.floor(rtt / 2);
+
+      setTimeOffsetMs(estimatedServerNowAtT1 - t1);
+    } catch (e) {
+      setTimeErr(e?.message || "Time sync error");
+      // keep old offset (or 0)
+    }
+  };
 
   /* -------------------- sample data -------------------- */
   const offices = useMemo(
@@ -61,20 +95,18 @@ export default function AttendanceApp() {
   /* -------------------- selections -------------------- */
   const [officeId, setOfficeId] = useState("");
   const [employeeId, setEmployeeId] = useState("");
-
-  // selected action (radio)
   const [type, setType] = useState("checkin");
 
-  /* -------------------- IST clock (freeze rules) -------------------- */
+  /* -------------------- IST clock strings -------------------- */
   const [dateStr, setDateStr] = useState("");
   const [timeStr, setTimeStr] = useState("");
 
   useEffect(() => {
-    // if frozen, do not run realtime interval
+    // If frozen, do not run realtime interval
     if (isTimeFrozen) return;
 
     const tick = () => {
-      const { date, time } = istDateTimeParts(new Date());
+      const { date, time } = istDateTimeParts(trustedNow());
       setDateStr(date);
       setTimeStr(time);
     };
@@ -82,7 +114,7 @@ export default function AttendanceApp() {
     tick();
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
-  }, [isTimeFrozen]);
+  }, [isTimeFrozen, timeOffsetMs]);
 
   /* -------------------- location -------------------- */
   const [lat, setLat] = useState(null);
@@ -145,12 +177,17 @@ export default function AttendanceApp() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // initial load: location + time snapshot
+  // initial load: sync time + location + snapshot
   useEffect(() => {
-    getLocation();
-    const { date, time } = istDateTimeParts(new Date());
-    setDateStr(date);
-    setTimeStr(time);
+    (async () => {
+      await syncIstTime();     // ✅ sync from server
+      getLocation();
+
+      const { date, time } = istDateTimeParts(trustedNow());
+      setDateStr(date);
+      setTimeStr(time);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* -------------------- selfie -------------------- */
@@ -177,10 +214,8 @@ export default function AttendanceApp() {
     return [];
   }, [officeId, employeeId, lastAction]);
 
-  // whenever allowedTypes changes, ensure selected radio stays valid
   useEffect(() => {
     if (!officeId || !employeeId) return;
-
     const first = allowedTypes[0] || "checkin";
     if (!allowedTypes.includes(type)) setType(first);
   }, [officeId, employeeId, allowedTypes, type]);
@@ -257,7 +292,8 @@ export default function AttendanceApp() {
               setSelfieFile(null);
 
               if (val) {
-                const { date, time } = istDateTimeParts(new Date());
+                // freeze time as soon as office is selected (using trusted IST)
+                const { date, time } = istDateTimeParts(trustedNow());
                 setDateStr(date);
                 setTimeStr(time);
                 setIsTimeFrozen(true);
@@ -273,9 +309,11 @@ export default function AttendanceApp() {
               </option>
             ))}
           </select>
+
+          {timeErr && <div className="errorText">⏱ {timeErr}</div>}
         </div>
 
-        {/* STEP 2: Employee (only after office) */}
+        {/* STEP 2: Employee */}
         {officeId && (
           <div className="card">
             <label className="label">👤 Select Employee</label>
@@ -285,7 +323,6 @@ export default function AttendanceApp() {
               onChange={(e) => {
                 const val = e.target.value;
                 setEmployeeId(val);
-
                 setLastAction(null);
                 setType("checkin");
                 setSelfieFile(null);
@@ -301,7 +338,7 @@ export default function AttendanceApp() {
           </div>
         )}
 
-        {/* STEP 3: Attendance Type (only after employee) */}
+        {/* STEP 3: Attendance Type */}
         {officeId && employeeId && (
           <div className="card">
             <label className="label">❗ Attendance Type</label>
@@ -343,7 +380,7 @@ export default function AttendanceApp() {
         {/* Date/Time/Location info */}
         <div className="card">
           <div className="infoLine">📅 Date: {dateStr}</div>
-          <div className="infoLine">🕒 Time (IST): {timeStr}</div>
+          <div className="infoLine">🕒 Time (IST - synced): {timeStr}</div>
 
           {lat != null && lng != null && (
             <div className="infoLine">
@@ -360,7 +397,7 @@ export default function AttendanceApp() {
           <MapView lat={lat} lng={lng} />
         </div>
 
-        {/* Selfie + Submit (only after employee + allowed action exists) */}
+        {/* Selfie + Submit */}
         {officeId && employeeId && allowedTypes.length > 0 && (
           <div className="card">
             <button
@@ -379,11 +416,7 @@ export default function AttendanceApp() {
 
             <div className="previewBox">
               {selfiePreview ? (
-                <img
-                  className="previewImg"
-                  src={selfiePreview}
-                  alt="Selfie Preview"
-                />
+                <img className="previewImg" src={selfiePreview} alt="Selfie Preview" />
               ) : (
                 <div className="placeholder">Selfie Preview</div>
               )}
