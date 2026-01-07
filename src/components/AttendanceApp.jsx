@@ -50,6 +50,13 @@ async function fetchJsonWithTimeout(url, ms = 8000) {
   }
 }
 
+const ACTION_LABELS = {
+  checkin: "Checkin",
+  checkout: "Checkout",
+  lunchStart: "Lunch Start",
+  lunchEnd: "Lunch End",
+};
+
 export default function AttendanceApp() {
   /* -------------------- camera -------------------- */
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -95,12 +102,10 @@ export default function AttendanceApp() {
     return new Date(serverEpochMs + deltaMs);
   };
 
-  // ✅ Strong time sync: fallback + retry (console-only errors)
   const syncKolkataTime = async () => {
     setIsTimeReady(false);
 
     const providers = [
-      // timeapi.io
       async () => {
         const t0 = performance.now();
         const data = await fetchJsonWithTimeout(
@@ -111,7 +116,6 @@ export default function AttendanceApp() {
         const rtt = performance.now() - t0;
         return serverMs + Math.floor(rtt / 2);
       },
-      // worldtimeapi.org
       async () => {
         const t0 = performance.now();
         const data = await fetchJsonWithTimeout(
@@ -177,7 +181,6 @@ export default function AttendanceApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isTimeFrozen, timeSync]);
 
-  // Sync on load + every 5 minutes
   useEffect(() => {
     syncKolkataTime();
     const t = setInterval(syncKolkataTime, 5 * 60 * 1000);
@@ -185,7 +188,6 @@ export default function AttendanceApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // If time is frozen and sync arrives later, set frozen time once
   useEffect(() => {
     if (!officeId || !isTimeFrozen) return;
     const trusted = getTrustedNow();
@@ -276,7 +278,7 @@ export default function AttendanceApp() {
     if (!allowedTypes.includes(type)) setType(first);
   }, [officeId, employeeId, allowedTypes, type]);
 
-  /* -------------------- ✅ SOFT REFRESH (no reload) -------------------- */
+  /* -------------------- ✅ SOFT REFRESH (whole page reset, no reload) -------------------- */
   const onRefreshAll = async () => {
     console.log("[APP] Refresh");
 
@@ -322,10 +324,12 @@ export default function AttendanceApp() {
     };
 
     console.log("Attendance payload:", payload);
-    alert(`Saved: ${type}`);
 
-    setLastAction(type);
-    setSelfieFile(null);
+    const msg = `${ACTION_LABELS[type] || type} submitted ✅`;
+    alert(msg); // user clicks OK
+
+    // ✅ after OK -> refresh whole page state
+    await onRefreshAll();
   };
 
   return (
@@ -421,7 +425,11 @@ export default function AttendanceApp() {
               ].map((opt) => {
                 const enabled = allowedTypes.includes(opt.key);
                 return (
-                  <label key={opt.key} className="radioItem" style={{ opacity: enabled ? 1 : 0.35 }}>
+                  <label
+                    key={opt.key}
+                    className="radioItem"
+                    style={{ opacity: enabled ? 1 : 0.35 }}
+                  >
                     <input
                       type="radio"
                       name="type"
@@ -460,7 +468,11 @@ export default function AttendanceApp() {
         {/* Selfie + Submit */}
         {officeId && employeeId && allowedTypes.length > 0 && (
           <div className="card">
-            <button className="btn purple" type="button" onClick={() => setCameraOpen(true)}>
+            <button
+              className="btn purple"
+              type="button"
+              onClick={() => setCameraOpen(true)}
+            >
               📷 Take Selfie
             </button>
 
@@ -472,7 +484,11 @@ export default function AttendanceApp() {
 
             <div className="previewBox">
               {selfiePreview ? (
-                <img className="previewImg" src={selfiePreview} alt="Selfie Preview" />
+                <img
+                  className="previewImg"
+                  src={selfiePreview}
+                  alt="Selfie Preview"
+                />
               ) : (
                 <div className="placeholder">Selfie Preview</div>
               )}
