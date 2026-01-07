@@ -34,12 +34,12 @@ async function reverseGeocode(lat, lng) {
 /* -------------------- small helpers -------------------- */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function fetchJsonWithTimeout(url, ms = 8000) {
+async function fetchJsonWithTimeout(url, ms = 8000, headers = {}) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
     const res = await fetch(url, {
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", ...headers },
       cache: "no-store",
       signal: ctrl.signal,
     });
@@ -90,20 +90,72 @@ export default function AttendanceApp() {
   const [isTimeFrozen, setIsTimeFrozen] = useState(false);
   const [isLocationFrozen, setIsLocationFrozen] = useState(false);
 
-  /* -------------------- sample data -------------------- */
-  const offices = useMemo(
-    () => [
-      { id: "ahm", name: "Ahmedabad Office" },
-      { id: "mum", name: "Mumbai Office" },
-    ],
-    []
-  );
+  /* -------------------- ✅ offices from ESPO (dynamic) -------------------- */
+  const [offices, setOffices] = useState([]);
+  const [officesLoading, setOfficesLoading] = useState(true);
 
+  const ESPO_BASEURL = (import.meta.env.VITE_ESPO_BASEURL || "").trim();
+  const ESPO_API_KEY = (import.meta.env.VITE_X_API_KEY || "").trim();
+
+  const loadOfficesFromEspo = async () => {
+    try {
+      setOfficesLoading(true);
+
+      if (!ESPO_BASEURL) {
+        console.warn("[ESPO] VITE_ESPO_BASEURL missing");
+        setOffices([]);
+        return;
+      }
+      if (!ESPO_API_KEY) {
+        console.warn("[ESPO] VITE_X_API_KEY missing");
+        setOffices([]);
+        return;
+      }
+
+      // If you want extra condition/query params, add here safely:
+      // const u = new URL(ESPO_BASEURL);
+      // u.searchParams.set("maxSize", "200");
+      // const url = u.toString();
+      const url = ESPO_BASEURL;
+
+      const data = await fetchJsonWithTimeout(
+        url,
+        12000,
+        { "X-Api-Key": ESPO_API_KEY }
+      );
+
+      const list = Array.isArray(data?.list) ? data.list : [];
+      const uniq = [];
+      const seen = new Set();
+
+      for (const row of list) {
+        const code = String(row?.officeCode || "").trim();
+        if (!code) continue;
+        if (seen.has(code)) continue;
+        seen.add(code);
+        uniq.push({ id: code, name: code }); // ✅ unique id + label = officeCode
+      }
+
+      setOffices(uniq);
+    } catch (e) {
+      console.warn("[ESPO] offices fetch failed:", e?.message || e);
+      setOffices([]);
+    } finally {
+      setOfficesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadOfficesFromEspo();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* -------------------- sample employees (same as before) -------------------- */
   const employees = useMemo(
     () => [
-      { id: "e1", officeId: "ahm", name: "Rahul Patel" },
-      { id: "e2", officeId: "ahm", name: "Kiran Shah" },
-      { id: "e3", officeId: "mum", name: "Neha Mehta" },
+      { id: "e1", officeId: "Narol-Warehouse", name: "Rahul Patel" },
+      { id: "e2", officeId: "Narol-Warehouse", name: "Kiran Shah" },
+      { id: "e3", officeId: "Safal-404", name: "Neha Mehta" },
     ],
     []
   );
@@ -219,14 +271,12 @@ export default function AttendanceApp() {
     tick();
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isTimeFrozen, timeSync]);
 
   useEffect(() => {
     syncKolkataTime();
     const t = setInterval(syncKolkataTime, 5 * 60 * 1000);
     return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* -------------------- location (LIVE) -------------------- */
@@ -277,7 +327,6 @@ export default function AttendanceApp() {
         if (err.code === 1) setLocErr("Location blocked. Please allow Location permission.");
         else if (err.code === 2) setLocErr("Location unavailable (turn on GPS).");
         else setLocErr(err.message || "Location error");
-
         console.warn("[LOC] Location error:", err);
       },
       opts
@@ -286,10 +335,8 @@ export default function AttendanceApp() {
 
   useEffect(() => {
     getLocation();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* -------------------- freeze location helper -------------------- */
   const freezeLocationNow = async () => {
     setIsLocationFrozen(true);
 
@@ -354,10 +401,8 @@ export default function AttendanceApp() {
     if (!allowedTypes.includes(type)) setType(first);
   }, [officeId, employeeId, allowedTypes, type]);
 
-  /* -------------------- ✅ SOFT REFRESH (whole page reset, no reload) -------------------- */
+  /* -------------------- ✅ refresh all -------------------- */
   const onRefreshAll = async () => {
-    console.log("[APP] Refresh");
-
     setCameraOpen(false);
     setOfficeId("");
     setEmployeeId("");
@@ -381,11 +426,11 @@ export default function AttendanceApp() {
 
     await syncKolkataTime();
     getLocation();
+    loadOfficesFromEspo(); // ✅ reload offices too
   };
 
   /* -------------------- submit -------------------- */
   const onSubmit = async () => {
-    // validations (use in-app modal instead of alert)
     if (!officeId) return openModal(COMPANY_NAME, "Please select office.");
     if (!employeeId) return openModal(COMPANY_NAME, "Please select employee.");
     if (!allowedTypes.includes(type))
@@ -410,13 +455,7 @@ export default function AttendanceApp() {
     console.log("Attendance payload:", payload);
 
     const actionLabel = ACTION_LABELS[type] || type;
-
-    // ✅ success modal — OK triggers refresh
-    openModal(
-      COMPANY_NAME,
-      `${COMPANY_NAME}: ${actionLabel} submitted ✅`,
-      true
-    );
+    openModal(COMPANY_NAME, `${COMPANY_NAME}: ${actionLabel} submitted ✅`, true);
   };
 
   const onModalOk = async () => {
@@ -427,7 +466,6 @@ export default function AttendanceApp() {
 
   return (
     <div className="page">
-      {/* ✅ in-app modal */}
       <AppModal
         open={modal.open}
         title={modal.title}
@@ -454,6 +492,7 @@ export default function AttendanceApp() {
           <select
             className="input"
             value={officeId}
+            disabled={officesLoading}
             onChange={async (e) => {
               const val = e.target.value;
 
@@ -464,7 +503,6 @@ export default function AttendanceApp() {
               setSelfieFile(null);
 
               if (val) {
-                // ✅ Freeze time
                 setIsTimeFrozen(true);
                 const trusted = getTrustedNow();
                 if (trusted) {
@@ -475,11 +513,8 @@ export default function AttendanceApp() {
                   setDateStr("--");
                   setTimeStr("--");
                 }
-
-                // ✅ Freeze location
                 await freezeLocationNow();
               } else {
-                // ✅ Unfreeze
                 setIsTimeFrozen(false);
                 setIsLocationFrozen(false);
                 setFrozenLat(null);
@@ -488,7 +523,10 @@ export default function AttendanceApp() {
               }
             }}
           >
-            <option value="">Select Office</option>
+            <option value="">
+              {officesLoading ? "Loading offices..." : offices.length ? "Select Office" : "No offices found"}
+            </option>
+
             {offices.map((o) => (
               <option key={o.id} value={o.id}>
                 {o.name}
