@@ -90,75 +90,96 @@ export default function AttendanceApp() {
   const [isTimeFrozen, setIsTimeFrozen] = useState(false);
   const [isLocationFrozen, setIsLocationFrozen] = useState(false);
 
-  /* -------------------- ✅ offices from ESPO (dynamic) -------------------- */
+  /* -------------------- ✅ offices + employees from ESPO (dynamic) -------------------- */
   const [offices, setOffices] = useState([]);
-  const [officesLoading, setOfficesLoading] = useState(true);
+  const [employeesByOffice, setEmployeesByOffice] = useState({}); // { [officeCode]: [{id,name}] }
+  const [orgLoading, setOrgLoading] = useState(true);
 
   const ESPO_BASEURL = (import.meta.env.VITE_ESPO_BASEURL || "").trim();
   const ESPO_API_KEY = (import.meta.env.VITE_X_API_KEY || "").trim();
 
-  const loadOfficesFromEspo = async () => {
+  const normalizeKey = (s) => String(s || "").trim().toLowerCase();
+
+  const loadOrgFromEspo = async () => {
     try {
-      setOfficesLoading(true);
+      setOrgLoading(true);
 
       if (!ESPO_BASEURL) {
         console.warn("[ESPO] VITE_ESPO_BASEURL missing");
         setOffices([]);
+        setEmployeesByOffice({});
         return;
       }
       if (!ESPO_API_KEY) {
         console.warn("[ESPO] VITE_X_API_KEY missing");
         setOffices([]);
+        setEmployeesByOffice({});
         return;
       }
 
-      // If you want extra condition/query params, add here safely:
-      // const u = new URL(ESPO_BASEURL);
-      // u.searchParams.set("maxSize", "200");
-      // const url = u.toString();
       const url = ESPO_BASEURL;
 
-      const data = await fetchJsonWithTimeout(
-        url,
-        12000,
-        { "X-Api-Key": ESPO_API_KEY }
-      );
+      const data = await fetchJsonWithTimeout(url, 12000, {
+        "X-Api-Key": ESPO_API_KEY,
+      });
 
       const list = Array.isArray(data?.list) ? data.list : [];
-      const uniq = [];
-      const seen = new Set();
+
+      // Unique offices
+      const officeSeen = new Set();
+      const officeArr = [];
+
+      // Employees grouped by office (unique)
+      const empMap = {}; // officeCode -> { seen:Set, arr:[] }
+      const getBucket = (officeCode) => {
+        if (!empMap[officeCode]) {
+          empMap[officeCode] = { seen: new Set(), arr: [] };
+        }
+        return empMap[officeCode];
+      };
 
       for (const row of list) {
-        const code = String(row?.officeCode || "").trim();
-        if (!code) continue;
-        if (seen.has(code)) continue;
-        seen.add(code);
-        uniq.push({ id: code, name: code }); // ✅ unique id + label = officeCode
+        const officeCode = String(row?.officeCode || "").trim();
+        const employeeName = String(row?.employeeName || "").trim(); // ✅ you asked employeeName
+
+        // office unique
+        if (officeCode && !officeSeen.has(normalizeKey(officeCode))) {
+          officeSeen.add(normalizeKey(officeCode));
+          officeArr.push({ id: officeCode, name: officeCode });
+        }
+
+        // employee unique per office
+        if (officeCode && employeeName) {
+          const b = getBucket(officeCode);
+          const key = normalizeKey(employeeName);
+          if (!b.seen.has(key)) {
+            b.seen.add(key);
+            b.arr.push({ id: employeeName, name: employeeName });
+          }
+        }
       }
 
-      setOffices(uniq);
+      // finalize employeesByOffice
+      const finalEmployeesByOffice = {};
+      for (const [officeCode, b] of Object.entries(empMap)) {
+        finalEmployeesByOffice[officeCode] = b.arr;
+      }
+
+      setOffices(officeArr);
+      setEmployeesByOffice(finalEmployeesByOffice);
     } catch (e) {
-      console.warn("[ESPO] offices fetch failed:", e?.message || e);
+      console.warn("[ESPO] org fetch failed:", e?.message || e);
       setOffices([]);
+      setEmployeesByOffice({});
     } finally {
-      setOfficesLoading(false);
+      setOrgLoading(false);
     }
   };
 
   useEffect(() => {
-    loadOfficesFromEspo();
+    loadOrgFromEspo();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  /* -------------------- sample employees (same as before) -------------------- */
-  const employees = useMemo(
-    () => [
-      { id: "e1", officeId: "Narol-Warehouse", name: "Rahul Patel" },
-      { id: "e2", officeId: "Narol-Warehouse", name: "Kiran Shah" },
-      { id: "e3", officeId: "Safal-404", name: "Neha Mehta" },
-    ],
-    []
-  );
 
   /* -------------------- selections -------------------- */
   const [officeId, setOfficeId] = useState("");
@@ -379,11 +400,11 @@ export default function AttendanceApp() {
     return URL.createObjectURL(selfieFile);
   }, [selfieFile]);
 
-  /* -------------------- employee list by office -------------------- */
+  /* -------------------- ✅ employees list by selected office (from ESPO) -------------------- */
   const filteredEmployees = useMemo(() => {
     if (!officeId) return [];
-    return employees.filter((e) => e.officeId === officeId);
-  }, [officeId, employees]);
+    return Array.isArray(employeesByOffice?.[officeId]) ? employeesByOffice[officeId] : [];
+  }, [officeId, employeesByOffice]);
 
   /* -------------------- allowed actions rules -------------------- */
   const allowedTypes = useMemo(() => {
@@ -426,7 +447,7 @@ export default function AttendanceApp() {
 
     await syncKolkataTime();
     getLocation();
-    loadOfficesFromEspo(); // ✅ reload offices too
+    await loadOrgFromEspo(); // ✅ reload offices + employees
   };
 
   /* -------------------- submit -------------------- */
@@ -436,13 +457,12 @@ export default function AttendanceApp() {
     if (!allowedTypes.includes(type))
       return openModal(COMPANY_NAME, "This action is not allowed now. Follow the order.");
     if (!isTimeReady) return openModal(COMPANY_NAME, "Kolkata time is syncing. Wait 1–2 seconds.");
-    if (displayLat == null || displayLng == null)
-      return openModal(COMPANY_NAME, "Location not available.");
+    if (displayLat == null || displayLng == null) return openModal(COMPANY_NAME, "Location not available.");
     if (!selfieFile) return openModal(COMPANY_NAME, "Please take selfie.");
 
     const payload = {
-      officeId,
-      employeeId,
+      officeCode: officeId,
+      employeeName: employeeId,
       type,
       date: dateStr,
       timeIST: timeStr,
@@ -466,13 +486,7 @@ export default function AttendanceApp() {
 
   return (
     <div className="page">
-      <AppModal
-        open={modal.open}
-        title={modal.title}
-        message={modal.message}
-        okText="OK"
-        onOk={onModalOk}
-      />
+      <AppModal open={modal.open} title={modal.title} message={modal.message} okText="OK" onOk={onModalOk} />
 
       <header className="topbar">
         <div className="brand">
@@ -492,7 +506,7 @@ export default function AttendanceApp() {
           <select
             className="input"
             value={officeId}
-            disabled={officesLoading}
+            disabled={orgLoading}
             onChange={async (e) => {
               const val = e.target.value;
 
@@ -524,9 +538,8 @@ export default function AttendanceApp() {
             }}
           >
             <option value="">
-              {officesLoading ? "Loading offices..." : offices.length ? "Select Office" : "No offices found"}
+              {orgLoading ? "Loading offices..." : offices.length ? "Select Office" : "No offices found"}
             </option>
-
             {offices.map((o) => (
               <option key={o.id} value={o.id}>
                 {o.name}
@@ -550,7 +563,10 @@ export default function AttendanceApp() {
                 setSelfieFile(null);
               }}
             >
-              <option value="">Select Employee</option>
+              <option value="">
+                {filteredEmployees.length ? "Select Employee" : "No employees found"}
+              </option>
+
               {filteredEmployees.map((e) => (
                 <option key={e.id} value={e.id}>
                   {e.name}
@@ -617,11 +633,7 @@ export default function AttendanceApp() {
               📷 Take Selfie
             </button>
 
-            <SelfieCamera
-              open={cameraOpen}
-              onClose={() => setCameraOpen(false)}
-              onCapture={(file) => setSelfieFile(file)}
-            />
+            <SelfieCamera open={cameraOpen} onClose={() => setCameraOpen(false)} onCapture={(file) => setSelfieFile(file)} />
 
             <div className="previewBox">
               {selfiePreview ? (
