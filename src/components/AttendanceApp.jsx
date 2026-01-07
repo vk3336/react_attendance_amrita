@@ -3,7 +3,7 @@ import MapView from "./MapView";
 import SelfieCamera from "./SelfieCamera";
 
 /* -------------------- IST formatter (format only) -------------------- */
-function istDateTimePartsFromEpochMs(epochMs) {
+function istDateTimeParts(now = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kolkata",
     year: "numeric",
@@ -13,7 +13,7 @@ function istDateTimePartsFromEpochMs(epochMs) {
     minute: "2-digit",
     second: "2-digit",
     hour12: false,
-  }).formatToParts(new Date(epochMs));
+  }).formatToParts(now);
 
   const get = (t) => parts.find((p) => p.type === t)?.value || "";
   return {
@@ -63,53 +63,51 @@ export default function AttendanceApp() {
   const [employeeId, setEmployeeId] = useState("");
   const [type, setType] = useState("checkin");
 
-  /* -------------------- TRUSTED IST ONLY (NO device time) -------------------- */
-  // After sync:
-  // trustedEpochMs = serverEpochMs + (performance.now() - perfAtSync)
+  /* -------------------- TRUSTED IST TIME (NOT device time) -------------------- */
+  // We store: serverEpochMs (real time) + perfAtSync (monotonic)
+  // Then now = serverEpochMs + (performance.now() - perfAtSync)
   const [timeSync, setTimeSync] = useState({
     serverEpochMs: null,
     perfAtSync: null,
   });
   const [timeErr, setTimeErr] = useState("");
 
-  const hasTrustedTime =
-    timeSync.serverEpochMs != null && timeSync.perfAtSync != null;
-
-  const getTrustedEpochMs = () => {
-    if (!hasTrustedTime) return null; // ✅ no device fallback
-    const deltaMs = performance.now() - timeSync.perfAtSync;
-    return Math.round(timeSync.serverEpochMs + deltaMs);
+  const getTrustedNow = () => {
+    const { serverEpochMs, perfAtSync } = timeSync;
+    if (!serverEpochMs || perfAtSync == null) {
+      // fallback before first sync (will follow device, only until sync)
+      return new Date();
+    }
+    const deltaMs = performance.now() - perfAtSync;
+    return new Date(serverEpochMs + deltaMs);
   };
 
-  // Auto sync (no button)
   const syncKolkataTime = async () => {
     try {
       setTimeErr("");
-
       const tStartPerf = performance.now();
-      const res = await fetch(
-        "https://www.timeapi.io/api/Time/current/zone?timeZone=Asia/Kolkata",
-        { cache: "no-store" }
-      );
-      if (!res.ok) throw new Error("IST server time fetch failed");
 
+      const res = await fetch("https://worldtimeapi.org/api/timezone/Asia/Kolkata", {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error("Time sync failed");
       const data = await res.json();
-      const serverMs = new Date(data.dateTime).getTime();
-      if (!Number.isFinite(serverMs)) throw new Error("Invalid time response");
 
-      // small RTT compensation
+      // datetime is ISO string with correct time
+      const serverMs = new Date(data.datetime).getTime();
+
+      // crude network delay compensation (half RTT)
       const tEndPerf = performance.now();
-      const rtt = tEndPerf - tStartPerf;
-      const compensatedServerMs = serverMs + Math.floor(rtt / 2);
+      const rttMs = tEndPerf - tStartPerf;
+      const compensatedServerMs = serverMs + Math.floor(rttMs / 2);
 
       setTimeSync({
         serverEpochMs: compensatedServerMs,
         perfAtSync: performance.now(),
       });
     } catch (e) {
-      // keep previous trusted time if it exists; otherwise show "-"
-      if (!hasTrustedTime) setTimeSync({ serverEpochMs: null, perfAtSync: null });
-      setTimeErr("IST time not available (check internet).");
+      setTimeErr(e?.message || "Time sync error");
     }
   };
 
@@ -121,13 +119,7 @@ export default function AttendanceApp() {
     if (isTimeFrozen) return;
 
     const tick = () => {
-      const epochMs = getTrustedEpochMs();
-      if (epochMs == null) {
-        setDateStr("");
-        setTimeStr("");
-        return;
-      }
-      const { date, time } = istDateTimePartsFromEpochMs(epochMs);
+      const { date, time } = istDateTimeParts(getTrustedNow());
       setDateStr(date);
       setTimeStr(time);
     };
@@ -135,15 +127,14 @@ export default function AttendanceApp() {
     tick();
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // depend on sync object so it starts using trusted time after sync
   }, [isTimeFrozen, timeSync]);
 
-  // Auto sync on load + every 5 minutes
+  // Sync on load + re-sync every 5 minutes (keeps it accurate)
   useEffect(() => {
     syncKolkataTime();
     const t = setInterval(syncKolkataTime, 5 * 60 * 1000);
     return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* -------------------- location -------------------- */
@@ -159,6 +150,8 @@ export default function AttendanceApp() {
       setLocErr("Geolocation not supported");
       return;
     }
+
+    const opts = { enableHighAccuracy: true, maximumAge: 0 };
 
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
@@ -180,7 +173,7 @@ export default function AttendanceApp() {
         else if (err.code === 2) setLocErr("Location unavailable (turn on GPS).");
         else setLocErr(err.message || "Location error");
       },
-      { enableHighAccuracy: true, maximumAge: 0 }
+      opts
     );
   };
 
@@ -201,7 +194,10 @@ export default function AttendanceApp() {
 
   useEffect(() => {
     getLocation();
-  }, []);
+    const { date, time } = istDateTimeParts(getTrustedNow());
+    setDateStr(date);
+    setTimeStr(time);
+  }, []); // first paint snapshot
 
   /* -------------------- selfie -------------------- */
   const [selfieFile, setSelfieFile] = useState(null);
@@ -239,10 +235,7 @@ export default function AttendanceApp() {
   const onSubmit = async () => {
     if (!officeId) return alert("Please select office");
     if (!employeeId) return alert("Please select employee");
-    if (!allowedTypes.includes(type))
-      return alert("This action is not allowed now. Follow the order.");
-
-    if (!hasTrustedTime) return alert("IST time not available. Connect internet.");
+    if (!allowedTypes.includes(type)) return alert("This action is not allowed now. Follow the order.");
     if (lat == null || lng == null) return alert("Location not available");
     if (!selfieFile) return alert("Please take selfie");
 
@@ -295,15 +288,9 @@ export default function AttendanceApp() {
               setSelfieFile(null);
 
               if (val) {
-                const epochMs = getTrustedEpochMs();
-                if (epochMs != null) {
-                  const { date, time } = istDateTimePartsFromEpochMs(epochMs);
-                  setDateStr(date);
-                  setTimeStr(time);
-                } else {
-                  setDateStr("");
-                  setTimeStr("");
-                }
+                const { date, time } = istDateTimeParts(getTrustedNow());
+                setDateStr(date);
+                setTimeStr(time);
                 setIsTimeFrozen(true);
               } else {
                 setIsTimeFrozen(false);
@@ -360,11 +347,7 @@ export default function AttendanceApp() {
               ].map((opt) => {
                 const enabled = allowedTypes.includes(opt.key);
                 return (
-                  <label
-                    key={opt.key}
-                    className="radioItem"
-                    style={{ opacity: enabled ? 1 : 0.35 }}
-                  >
+                  <label key={opt.key} className="radioItem" style={{ opacity: enabled ? 1 : 0.35 }}>
                     <input
                       type="radio"
                       name="type"
@@ -386,14 +369,8 @@ export default function AttendanceApp() {
 
         {/* Date/Time/Location */}
         <div className="card">
-          <div className="infoLine">📅 Date: {dateStr || "-"}</div>
-          <div className="infoLine">🕒 Time (IST - standard): {timeStr || "-"}</div>
-
-          {!hasTrustedTime && (
-            <div className="errorText">
-              IST time not available (needs internet).
-            </div>
-          )}
+          <div className="infoLine">📅 Date: {dateStr}</div>
+          <div className="infoLine">🕒 Time (IST - standard): {timeStr}</div>
 
           {lat != null && lng != null && (
             <div className="infoLine">
@@ -413,11 +390,7 @@ export default function AttendanceApp() {
         {/* Selfie + Submit */}
         {officeId && employeeId && allowedTypes.length > 0 && (
           <div className="card">
-            <button
-              className="btn purple"
-              type="button"
-              onClick={() => setCameraOpen(true)}
-            >
+            <button className="btn purple" type="button" onClick={() => setCameraOpen(true)}>
               📷 Take Selfie
             </button>
 
