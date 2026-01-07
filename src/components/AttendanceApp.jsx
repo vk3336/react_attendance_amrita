@@ -31,12 +31,30 @@ async function reverseGeocode(lat, lng) {
   return data?.display_name || "";
 }
 
+/* -------------------- small helpers -------------------- */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function fetchJsonWithTimeout(url, ms = 8000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 export default function AttendanceApp() {
   /* -------------------- camera -------------------- */
   const [cameraOpen, setCameraOpen] = useState(false);
 
   /* -------------------- flow state -------------------- */
-  // null | "checkin" | "lunchStart" | "lunchEnd" | "checkout"
   const [lastAction, setLastAction] = useState(null);
   const [isTimeFrozen, setIsTimeFrozen] = useState(false);
 
@@ -63,63 +81,92 @@ export default function AttendanceApp() {
   const [employeeId, setEmployeeId] = useState("");
   const [type, setType] = useState("checkin");
 
-  /* -------------------- TRUSTED IST TIME (NOT device time) -------------------- */
-  // We store: serverEpochMs (real time) + perfAtSync (monotonic)
-  // Then now = serverEpochMs + (performance.now() - perfAtSync)
+  /* -------------------- TRUSTED IST TIME (NO DEVICE FALLBACK) -------------------- */
   const [timeSync, setTimeSync] = useState({
     serverEpochMs: null,
     perfAtSync: null,
   });
-  const [timeErr, setTimeErr] = useState("");
+  const [isTimeReady, setIsTimeReady] = useState(false);
 
   const getTrustedNow = () => {
     const { serverEpochMs, perfAtSync } = timeSync;
-    if (!serverEpochMs || perfAtSync == null) {
-      // fallback before first sync (will follow device, only until sync)
-      return new Date();
-    }
+    if (serverEpochMs == null || perfAtSync == null) return null; // ✅ no device time
     const deltaMs = performance.now() - perfAtSync;
     return new Date(serverEpochMs + deltaMs);
   };
 
+  // ✅ Strong time sync: fallback + retry (console-only errors)
   const syncKolkataTime = async () => {
-    try {
-      setTimeErr("");
-      const tStartPerf = performance.now();
+    setIsTimeReady(false);
 
-      const res = await fetch("https://worldtimeapi.org/api/timezone/Asia/Kolkata", {
-        headers: { Accept: "application/json" },
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error("Time sync failed");
-      const data = await res.json();
+    const providers = [
+      // timeapi.io
+      async () => {
+        const t0 = performance.now();
+        const data = await fetchJsonWithTimeout(
+          "https://timeapi.io/api/Time/current/zone?timeZone=Asia/Kolkata",
+          8000
+        );
+        const serverMs = new Date(data.dateTime).getTime();
+        const rtt = performance.now() - t0;
+        return serverMs + Math.floor(rtt / 2);
+      },
+      // worldtimeapi.org
+      async () => {
+        const t0 = performance.now();
+        const data = await fetchJsonWithTimeout(
+          "https://worldtimeapi.org/api/timezone/Asia/Kolkata",
+          8000
+        );
+        const serverMs = new Date(data.datetime).getTime();
+        const rtt = performance.now() - t0;
+        return serverMs + Math.floor(rtt / 2);
+      },
+    ];
 
-      // datetime is ISO string with correct time
-      const serverMs = new Date(data.datetime).getTime();
+    let lastError = null;
 
-      // crude network delay compensation (half RTT)
-      const tEndPerf = performance.now();
-      const rttMs = tEndPerf - tStartPerf;
-      const compensatedServerMs = serverMs + Math.floor(rttMs / 2);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      for (const p of providers) {
+        try {
+          const compensatedServerMs = await p();
+          if (!Number.isFinite(compensatedServerMs)) throw new Error("Invalid IST time");
 
-      setTimeSync({
-        serverEpochMs: compensatedServerMs,
-        perfAtSync: performance.now(),
-      });
-    } catch (e) {
-      setTimeErr(e?.message || "Time sync error");
+          setTimeSync({
+            serverEpochMs: compensatedServerMs,
+            perfAtSync: performance.now(),
+          });
+
+          setIsTimeReady(true);
+          console.log("[IST] Sync OK");
+          return;
+        } catch (e) {
+          lastError = e;
+          console.warn("[IST] Sync attempt failed:", e?.message || e);
+        }
+      }
+      await sleep(400 * attempt);
     }
+
+    console.error("[IST] Sync failed (all retries):", lastError?.message || lastError);
+    setIsTimeReady(false);
   };
 
   /* -------------------- IST clock strings -------------------- */
-  const [dateStr, setDateStr] = useState("");
-  const [timeStr, setTimeStr] = useState("");
+  const [dateStr, setDateStr] = useState("--");
+  const [timeStr, setTimeStr] = useState("--");
 
   useEffect(() => {
     if (isTimeFrozen) return;
 
     const tick = () => {
-      const { date, time } = istDateTimeParts(getTrustedNow());
+      const trusted = getTrustedNow();
+      if (!trusted) {
+        setDateStr("--");
+        setTimeStr("--");
+        return;
+      }
+      const { date, time } = istDateTimeParts(trusted);
       setDateStr(date);
       setTimeStr(time);
     };
@@ -127,15 +174,30 @@ export default function AttendanceApp() {
     tick();
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
-    // depend on sync object so it starts using trusted time after sync
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isTimeFrozen, timeSync]);
 
-  // Sync on load + re-sync every 5 minutes (keeps it accurate)
+  // Sync on load + every 5 minutes
   useEffect(() => {
     syncKolkataTime();
     const t = setInterval(syncKolkataTime, 5 * 60 * 1000);
     return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // If time is frozen and sync arrives later, set frozen time once
+  useEffect(() => {
+    if (!officeId || !isTimeFrozen) return;
+    const trusted = getTrustedNow();
+    if (!trusted) return;
+
+    if (dateStr === "--" || timeStr === "--") {
+      const { date, time } = istDateTimeParts(trusted);
+      setDateStr(date);
+      setTimeStr(time);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [officeId, isTimeFrozen, timeSync]);
 
   /* -------------------- location -------------------- */
   const [lat, setLat] = useState(null);
@@ -148,6 +210,7 @@ export default function AttendanceApp() {
 
     if (!("geolocation" in navigator)) {
       setLocErr("Geolocation not supported");
+      console.warn("[LOC] Geolocation not supported");
       return;
     }
 
@@ -164,40 +227,25 @@ export default function AttendanceApp() {
         try {
           const a = await reverseGeocode(la, ln);
           setAddress(a);
-        } catch {
+        } catch (e) {
           setAddress("");
+          console.warn("[LOC] Reverse geocode failed:", e?.message || e);
         }
       },
       (err) => {
         if (err.code === 1) setLocErr("Location blocked. Please allow Location permission.");
         else if (err.code === 2) setLocErr("Location unavailable (turn on GPS).");
         else setLocErr(err.message || "Location error");
+
+        console.warn("[LOC] Location error:", err);
       },
       opts
     );
   };
 
   useEffect(() => {
-    if (!("geolocation" in navigator)) return;
-
-    const watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        setLat(pos.coords.latitude);
-        setLng(pos.coords.longitude);
-      },
-      () => {},
-      { enableHighAccuracy: true, maximumAge: 0 }
-    );
-
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, []);
-
-  useEffect(() => {
     getLocation();
-    const { date, time } = istDateTimeParts(getTrustedNow());
-    setDateStr(date);
-    setTimeStr(time);
-  }, []); // first paint snapshot
+  }, []);
 
   /* -------------------- selfie -------------------- */
   const [selfieFile, setSelfieFile] = useState(null);
@@ -228,14 +276,36 @@ export default function AttendanceApp() {
     if (!allowedTypes.includes(type)) setType(first);
   }, [officeId, employeeId, allowedTypes, type]);
 
-  /* -------------------- FULL PAGE REFRESH -------------------- */
-  const onFullRefresh = () => window.location.reload();
+  /* -------------------- ✅ SOFT REFRESH (no reload) -------------------- */
+  const onRefreshAll = async () => {
+    console.log("[APP] Refresh");
+
+    setCameraOpen(false);
+    setOfficeId("");
+    setEmployeeId("");
+    setType("checkin");
+    setLastAction(null);
+    setSelfieFile(null);
+
+    setIsTimeFrozen(false);
+    setDateStr("--");
+    setTimeStr("--");
+
+    setLat(null);
+    setLng(null);
+    setAddress("");
+    setLocErr("");
+
+    await syncKolkataTime();
+    getLocation();
+  };
 
   /* -------------------- submit -------------------- */
   const onSubmit = async () => {
     if (!officeId) return alert("Please select office");
     if (!employeeId) return alert("Please select employee");
     if (!allowedTypes.includes(type)) return alert("This action is not allowed now. Follow the order.");
+    if (!isTimeReady) return alert("Kolkata time is syncing. Wait 1–2 seconds.");
     if (lat == null || lng == null) return alert("Location not available");
     if (!selfieFile) return alert("Please take selfie");
 
@@ -266,7 +336,7 @@ export default function AttendanceApp() {
           <div className="title">Amrita Global Enterprises</div>
         </div>
 
-        <button type="button" className="iconBtn" onClick={onFullRefresh} title="Refresh">
+        <button type="button" className="iconBtn" onClick={onRefreshAll} title="Refresh">
           ⟳
         </button>
       </header>
@@ -288,10 +358,16 @@ export default function AttendanceApp() {
               setSelfieFile(null);
 
               if (val) {
-                const { date, time } = istDateTimeParts(getTrustedNow());
-                setDateStr(date);
-                setTimeStr(time);
                 setIsTimeFrozen(true);
+                const trusted = getTrustedNow();
+                if (trusted) {
+                  const { date, time } = istDateTimeParts(trusted);
+                  setDateStr(date);
+                  setTimeStr(time);
+                } else {
+                  setDateStr("--");
+                  setTimeStr("--");
+                }
               } else {
                 setIsTimeFrozen(false);
               }
@@ -304,8 +380,6 @@ export default function AttendanceApp() {
               </option>
             ))}
           </select>
-
-          {timeErr && <div className="errorText">⏱ {timeErr}</div>}
         </div>
 
         {/* STEP 2: Employee */}
@@ -360,10 +434,6 @@ export default function AttendanceApp() {
                 );
               })}
             </div>
-
-            {allowedTypes.length === 0 && (
-              <div className="errorText">Attendance finished (Checkout done).</div>
-            )}
           </div>
         )}
 
