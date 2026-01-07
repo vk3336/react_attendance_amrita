@@ -57,13 +57,38 @@ const ACTION_LABELS = {
   lunchEnd: "Lunch End",
 };
 
+const COMPANY_NAME = "Amrita Global Enterprises";
+
+/* -------------------- In-App Modal (No "localhost says") -------------------- */
+function AppModal({ open, title, message, okText = "OK", onOk }) {
+  if (!open) return null;
+
+  return (
+    <div style={styles.modalOverlay} role="dialog" aria-modal="true">
+      <div style={styles.modalBox}>
+        <div style={styles.modalTitle}>{title}</div>
+        <div style={styles.modalMsg}>{message}</div>
+
+        <div style={styles.modalActions}>
+          <button type="button" style={styles.modalOkBtn} onClick={onOk}>
+            {okText}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AttendanceApp() {
   /* -------------------- camera -------------------- */
   const [cameraOpen, setCameraOpen] = useState(false);
 
   /* -------------------- flow state -------------------- */
   const [lastAction, setLastAction] = useState(null);
+
+  /* -------------------- freeze flags -------------------- */
   const [isTimeFrozen, setIsTimeFrozen] = useState(false);
+  const [isLocationFrozen, setIsLocationFrozen] = useState(false);
 
   /* -------------------- sample data -------------------- */
   const offices = useMemo(
@@ -88,6 +113,22 @@ export default function AttendanceApp() {
   const [employeeId, setEmployeeId] = useState("");
   const [type, setType] = useState("checkin");
 
+  /* -------------------- App Modal state -------------------- */
+  const [modal, setModal] = useState({
+    open: false,
+    title: "",
+    message: "",
+    refreshOnOk: false,
+  });
+
+  const openModal = (title, message, refreshOnOk = false) => {
+    setModal({ open: true, title, message, refreshOnOk });
+  };
+
+  const closeModal = () => {
+    setModal((m) => ({ ...m, open: false }));
+  };
+
   /* -------------------- TRUSTED IST TIME (NO DEVICE FALLBACK) -------------------- */
   const [timeSync, setTimeSync] = useState({
     serverEpochMs: null,
@@ -97,7 +138,7 @@ export default function AttendanceApp() {
 
   const getTrustedNow = () => {
     const { serverEpochMs, perfAtSync } = timeSync;
-    if (serverEpochMs == null || perfAtSync == null) return null; // ✅ no device time
+    if (serverEpochMs == null || perfAtSync == null) return null;
     const deltaMs = performance.now() - perfAtSync;
     return new Date(serverEpochMs + deltaMs);
   };
@@ -188,24 +229,20 @@ export default function AttendanceApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (!officeId || !isTimeFrozen) return;
-    const trusted = getTrustedNow();
-    if (!trusted) return;
-
-    if (dateStr === "--" || timeStr === "--") {
-      const { date, time } = istDateTimeParts(trusted);
-      setDateStr(date);
-      setTimeStr(time);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [officeId, isTimeFrozen, timeSync]);
-
-  /* -------------------- location -------------------- */
+  /* -------------------- location (LIVE) -------------------- */
   const [lat, setLat] = useState(null);
   const [lng, setLng] = useState(null);
   const [address, setAddress] = useState("");
   const [locErr, setLocErr] = useState("");
+
+  /* -------------------- location (FROZEN) -------------------- */
+  const [frozenLat, setFrozenLat] = useState(null);
+  const [frozenLng, setFrozenLng] = useState(null);
+  const [frozenAddress, setFrozenAddress] = useState("");
+
+  const displayLat = isLocationFrozen ? frozenLat : lat;
+  const displayLng = isLocationFrozen ? frozenLng : lng;
+  const displayAddress = isLocationFrozen ? frozenAddress : address;
 
   const getLocation = () => {
     setLocErr("");
@@ -223,14 +260,16 @@ export default function AttendanceApp() {
         const la = pos.coords.latitude;
         const ln = pos.coords.longitude;
 
-        setLat(la);
-        setLng(ln);
+        if (!isLocationFrozen) {
+          setLat(la);
+          setLng(ln);
+        }
 
         try {
           const a = await reverseGeocode(la, ln);
-          setAddress(a);
+          if (!isLocationFrozen) setAddress(a);
         } catch (e) {
-          setAddress("");
+          if (!isLocationFrozen) setAddress("");
           console.warn("[LOC] Reverse geocode failed:", e?.message || e);
         }
       },
@@ -247,7 +286,44 @@ export default function AttendanceApp() {
 
   useEffect(() => {
     getLocation();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /* -------------------- freeze location helper -------------------- */
+  const freezeLocationNow = async () => {
+    setIsLocationFrozen(true);
+
+    if (lat != null && lng != null) {
+      setFrozenLat(lat);
+      setFrozenLng(lng);
+      setFrozenAddress(address || "");
+      return;
+    }
+
+    await new Promise((resolve) => {
+      if (!("geolocation" in navigator)) return resolve();
+
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          const la = pos.coords.latitude;
+          const ln = pos.coords.longitude;
+
+          setFrozenLat(la);
+          setFrozenLng(ln);
+
+          try {
+            const a = await reverseGeocode(la, ln);
+            setFrozenAddress(a);
+          } catch {
+            setFrozenAddress("");
+          }
+          resolve();
+        },
+        () => resolve(),
+        { enableHighAccuracy: true, maximumAge: 0 }
+      );
+    });
+  };
 
   /* -------------------- selfie -------------------- */
   const [selfieFile, setSelfieFile] = useState(null);
@@ -293,6 +369,11 @@ export default function AttendanceApp() {
     setDateStr("--");
     setTimeStr("--");
 
+    setIsLocationFrozen(false);
+    setFrozenLat(null);
+    setFrozenLng(null);
+    setFrozenAddress("");
+
     setLat(null);
     setLng(null);
     setAddress("");
@@ -304,12 +385,15 @@ export default function AttendanceApp() {
 
   /* -------------------- submit -------------------- */
   const onSubmit = async () => {
-    if (!officeId) return alert("Please select office");
-    if (!employeeId) return alert("Please select employee");
-    if (!allowedTypes.includes(type)) return alert("This action is not allowed now. Follow the order.");
-    if (!isTimeReady) return alert("Kolkata time is syncing. Wait 1–2 seconds.");
-    if (lat == null || lng == null) return alert("Location not available");
-    if (!selfieFile) return alert("Please take selfie");
+    // validations (use in-app modal instead of alert)
+    if (!officeId) return openModal(COMPANY_NAME, "Please select office.");
+    if (!employeeId) return openModal(COMPANY_NAME, "Please select employee.");
+    if (!allowedTypes.includes(type))
+      return openModal(COMPANY_NAME, "This action is not allowed now. Follow the order.");
+    if (!isTimeReady) return openModal(COMPANY_NAME, "Kolkata time is syncing. Wait 1–2 seconds.");
+    if (displayLat == null || displayLng == null)
+      return openModal(COMPANY_NAME, "Location not available.");
+    if (!selfieFile) return openModal(COMPANY_NAME, "Please take selfie.");
 
     const payload = {
       officeId,
@@ -317,27 +401,45 @@ export default function AttendanceApp() {
       type,
       date: dateStr,
       timeIST: timeStr,
-      lat,
-      lng,
-      address,
+      lat: displayLat,
+      lng: displayLng,
+      address: displayAddress,
       selfieFileName: selfieFile.name,
     };
 
     console.log("Attendance payload:", payload);
 
-    const msg = `${ACTION_LABELS[type] || type} submitted ✅`;
-    alert(msg); // user clicks OK
+    const actionLabel = ACTION_LABELS[type] || type;
 
-    // ✅ after OK -> refresh whole page state
-    await onRefreshAll();
+    // ✅ success modal — OK triggers refresh
+    openModal(
+      COMPANY_NAME,
+      `${COMPANY_NAME}: ${actionLabel} submitted ✅`,
+      true
+    );
+  };
+
+  const onModalOk = async () => {
+    const shouldRefresh = modal.refreshOnOk;
+    closeModal();
+    if (shouldRefresh) await onRefreshAll();
   };
 
   return (
     <div className="page">
+      {/* ✅ in-app modal */}
+      <AppModal
+        open={modal.open}
+        title={modal.title}
+        message={modal.message}
+        okText="OK"
+        onOk={onModalOk}
+      />
+
       <header className="topbar">
         <div className="brand">
           <img className="logoImg" src="/logo.jpeg" alt="Amrita Logo" />
-          <div className="title">Amrita Global Enterprises</div>
+          <div className="title">{COMPANY_NAME}</div>
         </div>
 
         <button type="button" className="iconBtn" onClick={onRefreshAll} title="Refresh">
@@ -352,7 +454,7 @@ export default function AttendanceApp() {
           <select
             className="input"
             value={officeId}
-            onChange={(e) => {
+            onChange={async (e) => {
               const val = e.target.value;
 
               setOfficeId(val);
@@ -362,6 +464,7 @@ export default function AttendanceApp() {
               setSelfieFile(null);
 
               if (val) {
+                // ✅ Freeze time
                 setIsTimeFrozen(true);
                 const trusted = getTrustedNow();
                 if (trusted) {
@@ -372,8 +475,16 @@ export default function AttendanceApp() {
                   setDateStr("--");
                   setTimeStr("--");
                 }
+
+                // ✅ Freeze location
+                await freezeLocationNow();
               } else {
+                // ✅ Unfreeze
                 setIsTimeFrozen(false);
+                setIsLocationFrozen(false);
+                setFrozenLat(null);
+                setFrozenLng(null);
+                setFrozenAddress("");
               }
             }}
           >
@@ -425,11 +536,7 @@ export default function AttendanceApp() {
               ].map((opt) => {
                 const enabled = allowedTypes.includes(opt.key);
                 return (
-                  <label
-                    key={opt.key}
-                    className="radioItem"
-                    style={{ opacity: enabled ? 1 : 0.35 }}
-                  >
+                  <label key={opt.key} className="radioItem" style={{ opacity: enabled ? 1 : 0.35 }}>
                     <input
                       type="radio"
                       name="type"
@@ -450,29 +557,25 @@ export default function AttendanceApp() {
           <div className="infoLine">📅 Date: {dateStr}</div>
           <div className="infoLine">🕒 Time (IST - standard): {timeStr}</div>
 
-          {lat != null && lng != null && (
+          {displayLat != null && displayLng != null && (
             <div className="infoLine">
-              📍 Lat: {lat.toFixed(7)}, Lng: {lng.toFixed(7)}
+              📍 Lat: {displayLat.toFixed(7)}, Lng: {displayLng.toFixed(7)}
             </div>
           )}
 
-          {address && <div className="infoLine">📌 {address}</div>}
+          {displayAddress && <div className="infoLine">📌 {displayAddress}</div>}
           {locErr && <div className="errorText">{locErr}</div>}
         </div>
 
         {/* Map */}
         <div className="card mapCard">
-          <MapView lat={lat} lng={lng} />
+          <MapView lat={displayLat} lng={displayLng} />
         </div>
 
         {/* Selfie + Submit */}
         {officeId && employeeId && allowedTypes.length > 0 && (
           <div className="card">
-            <button
-              className="btn purple"
-              type="button"
-              onClick={() => setCameraOpen(true)}
-            >
+            <button className="btn purple" type="button" onClick={() => setCameraOpen(true)}>
               📷 Take Selfie
             </button>
 
@@ -484,11 +587,7 @@ export default function AttendanceApp() {
 
             <div className="previewBox">
               {selfiePreview ? (
-                <img
-                  className="previewImg"
-                  src={selfiePreview}
-                  alt="Selfie Preview"
-                />
+                <img className="previewImg" src={selfiePreview} alt="Selfie Preview" />
               ) : (
                 <div className="placeholder">Selfie Preview</div>
               )}
@@ -503,3 +602,51 @@ export default function AttendanceApp() {
     </div>
   );
 }
+
+/* -------------------- inline modal styles -------------------- */
+const styles = {
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.45)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+    zIndex: 9999,
+  },
+  modalBox: {
+    width: "100%",
+    maxWidth: 420,
+    background: "#fff",
+    borderRadius: 16,
+    boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
+    padding: 16,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: 800,
+    marginBottom: 10,
+  },
+  modalMsg: {
+    fontSize: 14,
+    lineHeight: 1.4,
+    color: "#111",
+    marginBottom: 14,
+    whiteSpace: "pre-wrap",
+  },
+  modalActions: {
+    display: "flex",
+    justifyContent: "flex-end",
+    gap: 10,
+  },
+  modalOkBtn: {
+    border: "none",
+    borderRadius: 12,
+    padding: "10px 16px",
+    fontWeight: 700,
+    cursor: "pointer",
+    background: "#111827",
+    color: "#fff",
+  },
+};
