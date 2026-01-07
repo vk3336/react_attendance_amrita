@@ -4,6 +4,11 @@ import App from "./App.jsx";
 import "./styles.css";
 import "leaflet/dist/leaflet.css";
 
+import { registerSW } from "virtual:pwa-register";
+
+registerSW({ immediate: true });
+
+
 // Fix leaflet marker icons in Vite
 import L from "leaflet";
 import markerIcon2x from "leaflet/dist/images/marker-icon-2x.png";
