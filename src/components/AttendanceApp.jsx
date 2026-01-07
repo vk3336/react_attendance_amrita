@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import MapView from "./MapView";
 import SelfieCamera from "./SelfieCamera";
 
-/* -------------------- IST time helper (format only) -------------------- */
-function istDateTimeParts(now = new Date()) {
+/* -------------------- IST formatter (format only) -------------------- */
+function istDateTimePartsFromEpochMs(epochMs) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kolkata",
     year: "numeric",
@@ -13,7 +13,7 @@ function istDateTimeParts(now = new Date()) {
     minute: "2-digit",
     second: "2-digit",
     hour12: false,
-  }).formatToParts(now);
+  }).formatToParts(new Date(epochMs));
 
   const get = (t) => parts.find((p) => p.type === t)?.value || "";
   return {
@@ -36,43 +36,9 @@ export default function AttendanceApp() {
   const [cameraOpen, setCameraOpen] = useState(false);
 
   /* -------------------- flow state -------------------- */
+  // null | "checkin" | "lunchStart" | "lunchEnd" | "checkout"
   const [lastAction, setLastAction] = useState(null);
   const [isTimeFrozen, setIsTimeFrozen] = useState(false);
-
-  /* -------------------- TRUSTED TIME (server sync offset) -------------------- */
-  // offsetMs = (trusted_now_ms - device_now_ms)
-  const [timeOffsetMs, setTimeOffsetMs] = useState(0);
-  const [timeErr, setTimeErr] = useState("");
-
-  const trustedNow = () => new Date(Date.now() + timeOffsetMs);
-
-  const syncIstTime = async () => {
-    try {
-      setTimeErr("");
-      const t0 = Date.now();
-
-      // Public time API (Asia/Kolkata)
-      const res = await fetch("https://worldtimeapi.org/api/timezone/Asia/Kolkata", {
-        headers: { Accept: "application/json" },
-      });
-      if (!res.ok) throw new Error("Time sync failed");
-
-      const data = await res.json();
-      const t1 = Date.now();
-
-      // data.datetime is ISO string with correct time
-      const serverMs = new Date(data.datetime).getTime();
-
-      // compensate network delay (very simple RTT/2)
-      const rtt = t1 - t0;
-      const estimatedServerNowAtT1 = serverMs + Math.floor(rtt / 2);
-
-      setTimeOffsetMs(estimatedServerNowAtT1 - t1);
-    } catch (e) {
-      setTimeErr(e?.message || "Time sync error");
-      // keep old offset (or 0)
-    }
-  };
 
   /* -------------------- sample data -------------------- */
   const offices = useMemo(
@@ -97,16 +63,71 @@ export default function AttendanceApp() {
   const [employeeId, setEmployeeId] = useState("");
   const [type, setType] = useState("checkin");
 
+  /* -------------------- TRUSTED IST ONLY (NO device time) -------------------- */
+  // After sync:
+  // trustedEpochMs = serverEpochMs + (performance.now() - perfAtSync)
+  const [timeSync, setTimeSync] = useState({
+    serverEpochMs: null,
+    perfAtSync: null,
+  });
+  const [timeErr, setTimeErr] = useState("");
+
+  const hasTrustedTime =
+    timeSync.serverEpochMs != null && timeSync.perfAtSync != null;
+
+  const getTrustedEpochMs = () => {
+    if (!hasTrustedTime) return null; // ✅ no device fallback
+    const deltaMs = performance.now() - timeSync.perfAtSync;
+    return Math.round(timeSync.serverEpochMs + deltaMs);
+  };
+
+  // Auto sync (no button)
+  const syncKolkataTime = async () => {
+    try {
+      setTimeErr("");
+
+      const tStartPerf = performance.now();
+      const res = await fetch(
+        "https://www.timeapi.io/api/Time/current/zone?timeZone=Asia/Kolkata",
+        { cache: "no-store" }
+      );
+      if (!res.ok) throw new Error("IST server time fetch failed");
+
+      const data = await res.json();
+      const serverMs = new Date(data.dateTime).getTime();
+      if (!Number.isFinite(serverMs)) throw new Error("Invalid time response");
+
+      // small RTT compensation
+      const tEndPerf = performance.now();
+      const rtt = tEndPerf - tStartPerf;
+      const compensatedServerMs = serverMs + Math.floor(rtt / 2);
+
+      setTimeSync({
+        serverEpochMs: compensatedServerMs,
+        perfAtSync: performance.now(),
+      });
+    } catch (e) {
+      // keep previous trusted time if it exists; otherwise show "-"
+      if (!hasTrustedTime) setTimeSync({ serverEpochMs: null, perfAtSync: null });
+      setTimeErr("IST time not available (check internet).");
+    }
+  };
+
   /* -------------------- IST clock strings -------------------- */
   const [dateStr, setDateStr] = useState("");
   const [timeStr, setTimeStr] = useState("");
 
   useEffect(() => {
-    // If frozen, do not run realtime interval
     if (isTimeFrozen) return;
 
     const tick = () => {
-      const { date, time } = istDateTimeParts(trustedNow());
+      const epochMs = getTrustedEpochMs();
+      if (epochMs == null) {
+        setDateStr("");
+        setTimeStr("");
+        return;
+      }
+      const { date, time } = istDateTimePartsFromEpochMs(epochMs);
       setDateStr(date);
       setTimeStr(time);
     };
@@ -114,7 +135,16 @@ export default function AttendanceApp() {
     tick();
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
-  }, [isTimeFrozen, timeOffsetMs]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isTimeFrozen, timeSync]);
+
+  // Auto sync on load + every 5 minutes
+  useEffect(() => {
+    syncKolkataTime();
+    const t = setInterval(syncKolkataTime, 5 * 60 * 1000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /* -------------------- location -------------------- */
   const [lat, setLat] = useState(null);
@@ -129,11 +159,6 @@ export default function AttendanceApp() {
       setLocErr("Geolocation not supported");
       return;
     }
-
-    const opts = {
-      enableHighAccuracy: true,
-      maximumAge: 0,
-    };
 
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
@@ -151,17 +176,14 @@ export default function AttendanceApp() {
         }
       },
       (err) => {
-        if (err.code === 1)
-          setLocErr("Location blocked. Please allow Location permission.");
-        else if (err.code === 2)
-          setLocErr("Location unavailable (turn on GPS).");
+        if (err.code === 1) setLocErr("Location blocked. Please allow Location permission.");
+        else if (err.code === 2) setLocErr("Location unavailable (turn on GPS).");
         else setLocErr(err.message || "Location error");
       },
-      opts
+      { enableHighAccuracy: true, maximumAge: 0 }
     );
   };
 
-  // Optional: keep updating lat/lng in background (good for accuracy)
   useEffect(() => {
     if (!("geolocation" in navigator)) return;
 
@@ -177,17 +199,8 @@ export default function AttendanceApp() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // initial load: sync time + location + snapshot
   useEffect(() => {
-    (async () => {
-      await syncIstTime();     // ✅ sync from server
-      getLocation();
-
-      const { date, time } = istDateTimeParts(trustedNow());
-      setDateStr(date);
-      setTimeStr(time);
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    getLocation();
   }, []);
 
   /* -------------------- selfie -------------------- */
@@ -206,7 +219,6 @@ export default function AttendanceApp() {
   /* -------------------- allowed actions rules -------------------- */
   const allowedTypes = useMemo(() => {
     if (!officeId || !employeeId) return [];
-
     if (lastAction === null) return ["checkin"];
     if (lastAction === "checkin") return ["lunchStart", "checkout"];
     if (lastAction === "lunchStart") return ["lunchEnd", "checkout"];
@@ -221,19 +233,16 @@ export default function AttendanceApp() {
   }, [officeId, employeeId, allowedTypes, type]);
 
   /* -------------------- FULL PAGE REFRESH -------------------- */
-  const onFullRefresh = () => {
-    window.location.reload();
-  };
+  const onFullRefresh = () => window.location.reload();
 
   /* -------------------- submit -------------------- */
   const onSubmit = async () => {
     if (!officeId) return alert("Please select office");
     if (!employeeId) return alert("Please select employee");
-
-    if (!allowedTypes.includes(type)) {
+    if (!allowedTypes.includes(type))
       return alert("This action is not allowed now. Follow the order.");
-    }
 
+    if (!hasTrustedTime) return alert("IST time not available. Connect internet.");
     if (lat == null || lng == null) return alert("Location not available");
     if (!selfieFile) return alert("Please take selfie");
 
@@ -256,7 +265,6 @@ export default function AttendanceApp() {
     setSelfieFile(null);
   };
 
-  /* -------------------- UI -------------------- */
   return (
     <div className="page">
       <header className="topbar">
@@ -265,12 +273,7 @@ export default function AttendanceApp() {
           <div className="title">Amrita Global Enterprises</div>
         </div>
 
-        <button
-          type="button"
-          className="iconBtn"
-          onClick={onFullRefresh}
-          title="Refresh"
-        >
+        <button type="button" className="iconBtn" onClick={onFullRefresh} title="Refresh">
           ⟳
         </button>
       </header>
@@ -292,10 +295,15 @@ export default function AttendanceApp() {
               setSelfieFile(null);
 
               if (val) {
-                // freeze time as soon as office is selected (using trusted IST)
-                const { date, time } = istDateTimeParts(trustedNow());
-                setDateStr(date);
-                setTimeStr(time);
+                const epochMs = getTrustedEpochMs();
+                if (epochMs != null) {
+                  const { date, time } = istDateTimePartsFromEpochMs(epochMs);
+                  setDateStr(date);
+                  setTimeStr(time);
+                } else {
+                  setDateStr("");
+                  setTimeStr("");
+                }
                 setIsTimeFrozen(true);
               } else {
                 setIsTimeFrozen(false);
@@ -351,7 +359,6 @@ export default function AttendanceApp() {
                 { key: "lunchEnd", label: "Lunch End" },
               ].map((opt) => {
                 const enabled = allowedTypes.includes(opt.key);
-
                 return (
                   <label
                     key={opt.key}
@@ -377,10 +384,16 @@ export default function AttendanceApp() {
           </div>
         )}
 
-        {/* Date/Time/Location info */}
+        {/* Date/Time/Location */}
         <div className="card">
-          <div className="infoLine">📅 Date: {dateStr}</div>
-          <div className="infoLine">🕒 Time (IST - synced): {timeStr}</div>
+          <div className="infoLine">📅 Date: {dateStr || "-"}</div>
+          <div className="infoLine">🕒 Time (IST - standard): {timeStr || "-"}</div>
+
+          {!hasTrustedTime && (
+            <div className="errorText">
+              IST time not available (needs internet).
+            </div>
+          )}
 
           {lat != null && lng != null && (
             <div className="infoLine">
