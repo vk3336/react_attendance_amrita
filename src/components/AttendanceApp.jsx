@@ -144,6 +144,12 @@ function fileToDataUrl(file) {
   });
 }
 
+/* -------------------- ✅ UTC datetime helpers for ESPO -------------------- */
+// Espo expects DateTime in UTC. We generate UTC SQL datetime from a Date object.
+function toUtcSqlDatetime(d) {
+  return new Date(d).toISOString().slice(0, 19).replace("T", " ");
+}
+
 export default function AttendanceApp() {
   /* -------------------- camera -------------------- */
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -228,7 +234,7 @@ export default function AttendanceApp() {
   /* -------------------- ✅ ESPO: upload selfie (hybrid approach) -------------------- */
   const espoUploadSelfie = async (file, fieldName) => {
     const dataUrl = await fileToDataUrl(file);
-    
+
     // Try the attachment endpoint first
     try {
       if (ESPO_ATTACHMENT_URL) {
@@ -250,27 +256,27 @@ export default function AttendanceApp() {
 
         const id = String(res?.id || "").trim();
         const name = String(res?.name || payload.name || "").trim();
-        
+
         if (id) {
           // Attachment upload succeeded
-          return { 
-            id, 
-            name, 
+          return {
+            id,
+            name,
             dataUrl,
-            useAttachment: true 
+            useAttachment: true,
           };
         }
       }
     } catch (e) {
       console.warn("Attachment upload failed, using fallback:", e.message);
     }
-    
+
     // Fallback: return base64 data only
     return {
       id: `selfie_${Date.now()}`,
       name: file.name || "selfie.jpg",
       dataUrl: dataUrl,
-      useAttachment: false
+      useAttachment: false,
     };
   };
 
@@ -382,7 +388,7 @@ export default function AttendanceApp() {
     setModal({ open: true, title, message, refreshOnOk });
   const closeModal = () => setModal((m) => ({ ...m, open: false }));
 
-  /* -------------------- FAST IST TIME -------------------- */
+  /* -------------------- FAST IST TIME (display only) -------------------- */
   const [timeSync, setTimeSync] = useState({
     serverEpochMs: null,
     perfAtSync: null,
@@ -398,6 +404,11 @@ export default function AttendanceApp() {
     if (serverEpochMs == null || perfAtSync == null) return null;
     const deltaMs = performance.now() - perfAtSync;
     return new Date(serverEpochMs + deltaMs);
+  };
+
+  // ✅ For ESPO saving: use trusted time if available, otherwise local Date()
+  const getSubmitNowDate = () => {
+    return getTrustedNow() || new Date();
   };
 
   const renderClock = (d) => {
@@ -689,15 +700,17 @@ export default function AttendanceApp() {
     const meta = TYPE_META[type];
     if (!meta) return openModal(COMPANY_NAME, "Invalid attendance type.");
 
+    // ✅ Use IST date for attendanceDate (same as before)
     const date = dateStr;
-    const dt = `${dateStr} ${timeStr}`;
+
+    // ✅ Use trusted server time for the actual DateTime fields, but SAVE it as UTC for Espo
+    const submitNow = getSubmitNowDate();
+    const dtUtc = toUtcSqlDatetime(submitNow); // <-- THIS FIXES "Tomorrow" issue
 
     try {
       // 0) Upload selfie (hybrid approach) - use field name without 'Id' suffix
-      const fieldName = meta.idField.replace('Id', '');
+      const fieldName = meta.idField.replace("Id", "");
       const uploaded = await espoUploadSelfie(selfieFile, fieldName);
-      console.log("Upload result:", uploaded);
-      console.log("Using field name:", fieldName);
 
       // 1) Find existing record
       const existing = await findTodayRecord({ employeeName: employeeId, attendanceDate: date });
@@ -707,7 +720,7 @@ export default function AttendanceApp() {
         console.warn("Location not available, using default coordinates for testing");
         const defaultLat = 23.0240815;
         const defaultLng = 72.4720621;
-        
+
         const basePayload = {
           name: employeeId,
           officeCode: officeId,
@@ -718,18 +731,16 @@ export default function AttendanceApp() {
           daykey: `${date}__${employeeId}`.toLowerCase(),
           notes: "Location not available - using default coordinates",
 
-          // ✅ store image data - use attachment fields if available, fallback to custom fields
-          ...(uploaded.useAttachment ? {
-            [meta.idField]: uploaded.id,
-            [meta.nameField]: uploaded.name,
-          } : {}),
-          // Always store base64 as backup
+          ...(uploaded.useAttachment
+            ? {
+                [meta.idField]: uploaded.id,
+                [meta.nameField]: uploaded.name,
+              }
+            : {}),
+
           [`${type}SelfieData`]: uploaded.dataUrl,
           [`${type}SelfieName`]: uploaded.name,
         };
-
-        console.log("Base payload (with default location):", basePayload);
-        console.log("Meta fields:", meta);
 
         if (!existing) {
           if (type !== "checkin") {
@@ -738,7 +749,7 @@ export default function AttendanceApp() {
 
           const createPayload = {
             ...basePayload,
-            [meta.timeField]: dt,
+            [meta.timeField]: dtUtc, // ✅ UTC value stored
             recordType: "Attendance",
           };
 
@@ -756,7 +767,7 @@ export default function AttendanceApp() {
 
         const updatePayload = {
           ...basePayload,
-          [meta.timeField]: dt,
+          [meta.timeField]: dtUtc, // ✅ UTC value stored
         };
 
         await espoUpdate(existing.id, updatePayload);
@@ -779,18 +790,16 @@ export default function AttendanceApp() {
         daykey: `${date}__${employeeId}`.toLowerCase(),
         notes: displayAddress || "",
 
-        // ✅ store image data - use attachment fields if available, fallback to custom fields
-        ...(uploaded.useAttachment ? {
-          [meta.idField]: uploaded.id,
-          [meta.nameField]: uploaded.name,
-        } : {}),
-        // Always store base64 as backup
+        ...(uploaded.useAttachment
+          ? {
+              [meta.idField]: uploaded.id,
+              [meta.nameField]: uploaded.name,
+            }
+          : {}),
+
         [`${type}SelfieData`]: uploaded.dataUrl,
         [`${type}SelfieName`]: uploaded.name,
       };
-
-      console.log("Base payload:", basePayload);
-      console.log("Meta fields:", meta);
 
       if (!existing) {
         if (type !== "checkin") {
@@ -799,7 +808,7 @@ export default function AttendanceApp() {
 
         const createPayload = {
           ...basePayload,
-          [meta.timeField]: dt,
+          [meta.timeField]: dtUtc, // ✅ UTC value stored
           recordType: "Attendance",
         };
 
@@ -817,7 +826,7 @@ export default function AttendanceApp() {
 
       const updatePayload = {
         ...basePayload,
-        [meta.timeField]: dt,
+        [meta.timeField]: dtUtc, // ✅ UTC value stored
       };
 
       await espoUpdate(existing.id, updatePayload);
@@ -855,7 +864,6 @@ export default function AttendanceApp() {
         <button type="button" className="iconBtn" onClick={onRefreshAll} title="Refresh">
           ⟳
         </button>
-        
       </header>
 
       <div className="container">
@@ -900,9 +908,7 @@ export default function AttendanceApp() {
               }
             }}
           >
-            <option value="">
-              {orgLoading ? "Loading offices..." : offices.length ? "Select Office" : "No offices found"}
-            </option>
+            <option value="">{orgLoading ? "Loading offices..." : offices.length ? "Select Office" : "No offices found"}</option>
             {offices.map((o) => (
               <option key={o.id} value={o.id}>
                 {o.name}
@@ -985,9 +991,6 @@ export default function AttendanceApp() {
         <div className="card mapCard">
           <MapView lat={displayLat} lng={displayLng} />
         </div>
-
-        {/* Debug info - remove this later */}
-        
 
         {/* Selfie + Submit */}
         {officeId && employeeId && allowedTypes.length > 0 && (
