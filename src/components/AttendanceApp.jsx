@@ -82,6 +82,32 @@ async function fetchDateHeaderMsWithTimeout(url, ms = 8000, headers = {}) {
   }
 }
 
+/* -------------------- FAST time cache helpers -------------------- */
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function readCachedTimeSync() {
+  try {
+    const raw = localStorage.getItem("TIME_SYNC_CACHE_V1");
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    if (!obj || !Number.isFinite(obj.serverEpochMs) || !Number.isFinite(obj.savedAtMs)) return null;
+    return obj;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedTimeSync(serverEpochMs) {
+  try {
+    localStorage.setItem(
+      "TIME_SYNC_CACHE_V1",
+      JSON.stringify({ serverEpochMs, savedAtMs: Date.now() })
+    );
+  } catch {}
+}
+
 const ACTION_LABELS = {
   checkin: "Checkin",
   checkout: "Checkout",
@@ -323,12 +349,20 @@ export default function AttendanceApp() {
 
   /* -------------------- App Modal state -------------------- */
   const [modal, setModal] = useState({ open: false, title: "", message: "", refreshOnOk: false });
-  const openModal = (title, message, refreshOnOk = false) => setModal({ open: true, title, message, refreshOnOk });
+  const openModal = (title, message, refreshOnOk = false) =>
+    setModal({ open: true, title, message, refreshOnOk });
   const closeModal = () => setModal((m) => ({ ...m, open: false }));
 
-  /* -------------------- TRUSTED IST TIME -------------------- */
-  const [timeSync, setTimeSync] = useState({ serverEpochMs: null, perfAtSync: null });
+  /* -------------------- FAST IST TIME (instant + background sync) -------------------- */
+  const [timeSync, setTimeSync] = useState({
+    serverEpochMs: null,
+    perfAtSync: null,
+    isAuthoritative: false,
+  });
   const [isTimeReady, setIsTimeReady] = useState(false);
+
+  const [dateStr, setDateStr] = useState("--");
+  const [timeStr, setTimeStr] = useState("--");
 
   const getTrustedNow = () => {
     const { serverEpochMs, perfAtSync } = timeSync;
@@ -337,9 +371,13 @@ export default function AttendanceApp() {
     return new Date(serverEpochMs + deltaMs);
   };
 
-  const syncKolkataTime = async () => {
-    setIsTimeReady(false);
+  const renderClock = (d) => {
+    const { date, time } = istDateTimeParts(d);
+    setDateStr(date);
+    setTimeStr(time);
+  };
 
+  const syncKolkataTimeFast = async () => {
     const providers = [
       async () => {
         if (!ESPO_BASEURL || !ESPO_API_KEY) throw new Error("ESPO not configured");
@@ -347,78 +385,97 @@ export default function AttendanceApp() {
         u.searchParams.set("maxSize", "1");
         u.searchParams.set("offset", "0");
         const t0 = performance.now();
-        const serverMs = await fetchDateHeaderMsWithTimeout(u.toString(), 8000, espoHeaders);
+        const serverMs = await fetchDateHeaderMsWithTimeout(u.toString(), 5000, espoHeaders);
         const rtt = performance.now() - t0;
         return serverMs + Math.floor(rtt / 2);
       },
       async () => {
         const t0 = performance.now();
-        const data = await fetchJsonWithTimeout("https://timeapi.io/api/Time/current/zone?timeZone=Asia/Kolkata", 8000);
+        const data = await fetchJsonWithTimeout(
+          "https://timeapi.io/api/Time/current/zone?timeZone=Asia/Kolkata",
+          5000
+        );
         const serverMs = new Date(data.dateTime).getTime();
         const rtt = performance.now() - t0;
         return serverMs + Math.floor(rtt / 2);
       },
       async () => {
         const t0 = performance.now();
-        const data = await fetchJsonWithTimeout("https://worldtimeapi.org/api/timezone/Asia/Kolkata", 8000);
+        const data = await fetchJsonWithTimeout(
+          "https://worldtimeapi.org/api/timezone/Asia/Kolkata",
+          5000
+        );
         const serverMs = new Date(data.datetime).getTime();
         const rtt = performance.now() - t0;
         return serverMs + Math.floor(rtt / 2);
       },
     ];
 
-    let lastError = null;
+    let lastErr = null;
 
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      for (const p of providers) {
-        try {
-          const compensatedServerMs = await p();
-          if (!Number.isFinite(compensatedServerMs)) throw new Error("Invalid IST time");
+    for (const p of providers) {
+      try {
+        const ms = await p();
+        if (!Number.isFinite(ms)) throw new Error("Invalid server time");
 
-          setTimeSync({ serverEpochMs: compensatedServerMs, perfAtSync: performance.now() });
-          setIsTimeReady(true);
-          return;
-        } catch (e) {
-          lastError = e;
-        }
+        setTimeSync({
+          serverEpochMs: ms,
+          perfAtSync: performance.now(),
+          isAuthoritative: true,
+        });
+        setIsTimeReady(true);
+        writeCachedTimeSync(ms);
+        return;
+      } catch (e) {
+        lastErr = e;
       }
-      await sleep(400 * attempt);
     }
 
-    console.warn("[IST] Sync failed:", lastError?.message || lastError);
-    setIsTimeReady(false);
+    console.warn("[IST] sync failed:", lastErr?.message || lastErr);
+    // keep UI running using fallback/cached time
   };
 
-  /* -------------------- IST clock strings -------------------- */
-  const [dateStr, setDateStr] = useState("--");
-  const [timeStr, setTimeStr] = useState("--");
+  // ✅ Instant clock on first paint + cached sync + background real sync
+  useEffect(() => {
+    // 1) show time immediately (device clock formatted to IST)
+    renderClock(new Date());
+    setIsTimeReady(true);
 
+    // 2) apply cached authoritative time instantly (if any)
+    const cached = readCachedTimeSync();
+    if (cached) {
+      const elapsed = Date.now() - cached.savedAtMs;
+      const corrected = cached.serverEpochMs + clamp(elapsed, 0, 24 * 60 * 60 * 1000);
+      setTimeSync({
+        serverEpochMs: corrected,
+        perfAtSync: performance.now(),
+        isAuthoritative: false, // until fresh sync succeeds
+      });
+    }
+
+    // 3) background sync (fast timeout)
+    syncKolkataTimeFast();
+
+    // 4) periodic background sync
+    const t = setInterval(syncKolkataTimeFast, 5 * 60 * 1000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Tick every second (trusted if available, else device time)
   useEffect(() => {
     if (isTimeFrozen) return;
 
     const tick = () => {
       const trusted = getTrustedNow();
-      if (!trusted) {
-        setDateStr("--");
-        setTimeStr("--");
-        return;
-      }
-      const { date, time } = istDateTimeParts(trusted);
-      setDateStr(date);
-      setTimeStr(time);
+      if (trusted) renderClock(trusted);
+      else renderClock(new Date());
     };
 
     tick();
     const t = setInterval(tick, 1000);
     return () => clearInterval(t);
   }, [isTimeFrozen, timeSync]);
-
-  useEffect(() => {
-    syncKolkataTime();
-    const t = setInterval(syncKolkataTime, 5 * 60 * 1000);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   /* -------------------- location (LIVE) -------------------- */
   const [lat, setLat] = useState(null);
@@ -462,7 +519,6 @@ export default function AttendanceApp() {
 
         try {
           const a = await reverseGeocode(la, ln);
-          // don't overwrite if a newer request already started
           if (lastGeoReqRef.current !== reqId) return;
           if (!isLocationFrozen) setAddress(a);
         } catch {
@@ -573,7 +629,7 @@ export default function AttendanceApp() {
     if (lastAction === "checkin") return ["lunchStart", "checkout"];
     if (lastAction === "lunchStart") return ["lunchEnd", "checkout"];
     if (lastAction === "lunchEnd") return ["checkout"];
-    return []; // after checkout => day finished (no more checkin same date)
+    return [];
   }, [officeId, employeeId, lastAction]);
 
   useEffect(() => {
@@ -592,8 +648,9 @@ export default function AttendanceApp() {
     setSelfieFile(null);
 
     setIsTimeFrozen(false);
-    setDateStr("--");
-    setTimeStr("--");
+    renderClock(new Date()); // show instantly
+    // background sync again
+    syncKolkataTimeFast();
 
     setIsLocationFrozen(false);
     setFrozenLat(null);
@@ -605,7 +662,6 @@ export default function AttendanceApp() {
     setAddress("");
     setLocErr("");
 
-    await syncKolkataTime();
     await loadOrgFromEspo();
   };
 
@@ -617,7 +673,7 @@ export default function AttendanceApp() {
     if (!officeId) return openModal(COMPANY_NAME, "Please select office.");
     if (!employeeId) return openModal(COMPANY_NAME, "Please select employee.");
     if (!allowedTypes.includes(type)) return openModal(COMPANY_NAME, "This action is not allowed now.");
-    if (!isTimeReady) return openModal(COMPANY_NAME, "Kolkata time is syncing. Wait 1–2 seconds.");
+    if (!isTimeReady) return openModal(COMPANY_NAME, "Time is initializing. Try again.");
     if (displayLat == null || displayLng == null) return openModal(COMPANY_NAME, "Location not available.");
     if (!selfieFile) return openModal(COMPANY_NAME, "Please take selfie.");
 
@@ -649,7 +705,6 @@ export default function AttendanceApp() {
         daykey: `${date}__${employeeId}`.toLowerCase(),
         notes: displayAddress || "",
 
-        // ✅ store selfie in your File field columns
         selfieImageId: uploaded.id,
         selfieImageName: uploaded.name,
       };
@@ -742,8 +797,10 @@ export default function AttendanceApp() {
                   setDateStr(date);
                   setTimeStr(time);
                 } else {
-                  setDateStr("--");
-                  setTimeStr("--");
+                  // still show instantly using device time in IST format
+                  const { date, time } = istDateTimeParts(new Date());
+                  setDateStr(date);
+                  setTimeStr(time);
                 }
 
                 await freezeLocationNow();
@@ -850,18 +907,10 @@ export default function AttendanceApp() {
               📷 Take Selfie
             </button>
 
-            <SelfieCamera
-              open={cameraOpen}
-              onClose={() => setCameraOpen(false)}
-              onCapture={(file) => setSelfieFile(file)}
-            />
+            <SelfieCamera open={cameraOpen} onClose={() => setCameraOpen(false)} onCapture={(file) => setSelfieFile(file)} />
 
             <div className="previewBox">
-              {selfiePreview ? (
-                <img className="previewImg" src={selfiePreview} alt="Selfie Preview" />
-              ) : (
-                <div className="placeholder">Selfie Preview</div>
-              )}
+              {selfiePreview ? <img className="previewImg" src={selfiePreview} alt="Selfie Preview" /> : <div className="placeholder">Selfie Preview</div>}
             </div>
 
             <button className="btn green" onClick={onSubmit}>
