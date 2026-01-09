@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import MapView from "./MapView";
 import SelfieCamera from "./SelfieCamera";
 
@@ -44,13 +44,15 @@ async function fetchJsonWithTimeout(url, ms = 8000, headers = {}, init = {}) {
       cache: "no-store",
       signal: ctrl.signal,
     });
+
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new Error(`HTTP ${res.status}${text ? ` — ${text}` : ""}`);
     }
+
     const ct = res.headers.get("content-type") || "";
     if (ct.includes("application/json")) return await res.json();
-    // fallback: if API returns empty JSON
+
     const txt = await res.text().catch(() => "");
     return txt ? JSON.parse(txt) : {};
   } finally {
@@ -108,6 +110,16 @@ function AppModal({ open, title, message, okText = "OK", onOk }) {
   );
 }
 
+/* -------------------- file -> dataURL(base64) -------------------- */
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("File read failed"));
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function AttendanceApp() {
   /* -------------------- camera -------------------- */
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -120,13 +132,29 @@ export default function AttendanceApp() {
   const [isLocationFrozen, setIsLocationFrozen] = useState(false);
 
   /* -------------------- ✅ ESPO env (Vite needs VITE_) -------------------- */
-  const ESPO_BASEURL = (import.meta.env.VITE_ESPO_BASEURL || "").trim(); // e.g. https://espo.egport.com/api/v1/CAttendance
-  const ESPO_API_KEY = (import.meta.env.VITE_X_API_KEY || "").trim(); // your key
+  const ESPO_BASEURL = (import.meta.env.VITE_ESPO_BASEURL || "").trim(); // https://espo.egport.com/api/v1/CAttendance
+  const ESPO_API_KEY = (import.meta.env.VITE_X_API_KEY || "").trim();
 
-  const espoHeaders = useMemo(() => {
-    const h = { "X-Api-Key": ESPO_API_KEY };
-    return h;
-  }, [ESPO_API_KEY]);
+  const espoHeaders = useMemo(() => ({ "X-Api-Key": ESPO_API_KEY }), [ESPO_API_KEY]);
+
+  const ESPO_API_ROOT = useMemo(() => {
+    try {
+      if (!ESPO_BASEURL) return "";
+      const u = new URL(ESPO_BASEURL);
+      u.search = "";
+      u.hash = "";
+      // remove last path segment (CAttendance)
+      u.pathname = u.pathname.replace(/\/[^/]+\/?$/, "");
+      return u.toString().replace(/\/$/, "");
+    } catch {
+      return "";
+    }
+  }, [ESPO_BASEURL]);
+
+  const ESPO_ATTACHMENT_URL = useMemo(() => {
+    if (!ESPO_API_ROOT) return "";
+    return `${ESPO_API_ROOT}/Attachment`;
+  }, [ESPO_API_ROOT]);
 
   const normalizeKey = (s) => String(s || "").trim().toLowerCase();
 
@@ -144,13 +172,6 @@ export default function AttendanceApp() {
     if (!ESPO_BASEURL) throw new Error("VITE_ESPO_BASEURL missing");
     if (!ESPO_API_KEY) throw new Error("VITE_X_API_KEY missing");
 
-    // EspoCRM "where" filter format
-    // where[0][type]=equals
-    // where[0][attribute]=employeeName
-    // where[0][value]=Rahul
-    // where[1][type]=equals
-    // where[1][attribute]=attendanceDate
-    // where[1][value]=2026-01-08
     const u = new URL(ESPO_BASEURL);
     u.searchParams.set("maxSize", "1");
     u.searchParams.set("offset", "0");
@@ -170,32 +191,52 @@ export default function AttendanceApp() {
     return list[0] || null;
   };
 
+  /* -------------------- ✅ ESPO: upload selfie to Attachment -------------------- */
+  const espoUploadSelfie = async (file) => {
+    if (!ESPO_ATTACHMENT_URL) throw new Error("ESPO Attachment URL not available");
+    const dataUrl = await fileToDataUrl(file);
+
+    const payload = {
+      name: file.name || "selfie.jpg",
+      type: file.type || "image/jpeg",
+      role: "Attachment",
+      // For a File-type field on CAttendance
+      relatedType: "CAttendance",
+      field: "selfieImage",
+      file: dataUrl, // "data:image/jpeg;base64,..."
+    };
+
+    const res = await fetchJsonWithTimeout(
+      ESPO_ATTACHMENT_URL,
+      20000,
+      { ...espoHeaders, "Content-Type": "application/json" },
+      { method: "POST", body: JSON.stringify(payload) }
+    );
+
+    const id = String(res?.id || "").trim();
+    const name = String(res?.name || payload.name || "").trim();
+    if (!id) throw new Error("Attachment upload failed: missing id");
+    return { id, name };
+  };
+
   /* -------------------- ✅ ESPO: create / update -------------------- */
   const espoCreate = async (payload) => {
-    const data = await fetchJsonWithTimeout(
+    return await fetchJsonWithTimeout(
       ESPO_BASEURL,
-      15000,
+      20000,
       { ...espoHeaders, "Content-Type": "application/json" },
-      {
-        method: "POST",
-        body: JSON.stringify(payload),
-      }
+      { method: "POST", body: JSON.stringify(payload) }
     );
-    return data;
   };
 
   const espoUpdate = async (id, payload) => {
     const url = `${ESPO_BASEURL.replace(/\/$/, "")}/${encodeURIComponent(id)}`;
-    const data = await fetchJsonWithTimeout(
+    return await fetchJsonWithTimeout(
       url,
-      15000,
+      20000,
       { ...espoHeaders, "Content-Type": "application/json" },
-      {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      }
+      { method: "PUT", body: JSON.stringify(payload) }
     );
-    return data;
   };
 
   const computeLastActionFromRecord = (rec) => {
@@ -209,7 +250,7 @@ export default function AttendanceApp() {
 
   /* -------------------- ✅ offices + employees from ESPO (dynamic) -------------------- */
   const [offices, setOffices] = useState([]);
-  const [employeesByOffice, setEmployeesByOffice] = useState({}); // { [officeCode]: [{id,name}] }
+  const [employeesByOffice, setEmployeesByOffice] = useState({});
   const [orgLoading, setOrgLoading] = useState(true);
 
   const loadOrgFromEspo = async () => {
@@ -222,16 +263,14 @@ export default function AttendanceApp() {
         return;
       }
 
-      // load a reasonable amount for dropdown building
       const url = buildEspoQueryUrl(ESPO_BASEURL, { maxSize: 200, offset: 0 });
-
       const data = await fetchJsonWithTimeout(url, 12000, espoHeaders);
       const list = Array.isArray(data?.list) ? data.list : [];
 
       const officeSeen = new Set();
       const officeArr = [];
 
-      const empMap = {}; // officeCode -> { seen:Set, arr:[] }
+      const empMap = {};
       const getBucket = (officeCode) => {
         if (!empMap[officeCode]) empMap[officeCode] = { seen: new Set(), arr: [] };
         return empMap[officeCode];
@@ -239,8 +278,6 @@ export default function AttendanceApp() {
 
       for (const row of list) {
         const officeCode = String(row?.officeCode || "").trim();
-
-        // employees: use employeeName only (your field)
         const employeeName = String(row?.employeeName || "").trim();
 
         if (officeCode && !officeSeen.has(normalizeKey(officeCode))) {
@@ -285,24 +322,12 @@ export default function AttendanceApp() {
   const [type, setType] = useState("checkin");
 
   /* -------------------- App Modal state -------------------- */
-  const [modal, setModal] = useState({
-    open: false,
-    title: "",
-    message: "",
-    refreshOnOk: false,
-  });
-
-  const openModal = (title, message, refreshOnOk = false) => {
-    setModal({ open: true, title, message, refreshOnOk });
-  };
-
+  const [modal, setModal] = useState({ open: false, title: "", message: "", refreshOnOk: false });
+  const openModal = (title, message, refreshOnOk = false) => setModal({ open: true, title, message, refreshOnOk });
   const closeModal = () => setModal((m) => ({ ...m, open: false }));
 
   /* -------------------- TRUSTED IST TIME -------------------- */
-  const [timeSync, setTimeSync] = useState({
-    serverEpochMs: null,
-    perfAtSync: null,
-  });
+  const [timeSync, setTimeSync] = useState({ serverEpochMs: null, perfAtSync: null });
   const [isTimeReady, setIsTimeReady] = useState(false);
 
   const getTrustedNow = () => {
@@ -328,20 +353,14 @@ export default function AttendanceApp() {
       },
       async () => {
         const t0 = performance.now();
-        const data = await fetchJsonWithTimeout(
-          "https://timeapi.io/api/Time/current/zone?timeZone=Asia/Kolkata",
-          8000
-        );
+        const data = await fetchJsonWithTimeout("https://timeapi.io/api/Time/current/zone?timeZone=Asia/Kolkata", 8000);
         const serverMs = new Date(data.dateTime).getTime();
         const rtt = performance.now() - t0;
         return serverMs + Math.floor(rtt / 2);
       },
       async () => {
         const t0 = performance.now();
-        const data = await fetchJsonWithTimeout(
-          "https://worldtimeapi.org/api/timezone/Asia/Kolkata",
-          8000
-        );
+        const data = await fetchJsonWithTimeout("https://worldtimeapi.org/api/timezone/Asia/Kolkata", 8000);
         const serverMs = new Date(data.datetime).getTime();
         const rtt = performance.now() - t0;
         return serverMs + Math.floor(rtt / 2);
@@ -356,11 +375,7 @@ export default function AttendanceApp() {
           const compensatedServerMs = await p();
           if (!Number.isFinite(compensatedServerMs)) throw new Error("Invalid IST time");
 
-          setTimeSync({
-            serverEpochMs: compensatedServerMs,
-            perfAtSync: performance.now(),
-          });
-
+          setTimeSync({ serverEpochMs: compensatedServerMs, perfAtSync: performance.now() });
           setIsTimeReady(true);
           return;
         } catch (e) {
@@ -411,6 +426,9 @@ export default function AttendanceApp() {
   const [address, setAddress] = useState("");
   const [locErr, setLocErr] = useState("");
 
+  // Keep last reverse-geocode request from overwriting newer coordinates
+  const lastGeoReqRef = useRef(0);
+
   /* -------------------- location (FROZEN) -------------------- */
   const [frozenLat, setFrozenLat] = useState(null);
   const [frozenLng, setFrozenLng] = useState(null);
@@ -420,7 +438,8 @@ export default function AttendanceApp() {
   const displayLng = isLocationFrozen ? frozenLng : lng;
   const displayAddress = isLocationFrozen ? frozenAddress : address;
 
-  const getLocation = () => {
+  // ✅ More accurate: watchPosition (first fix may be wrong, then improves)
+  useEffect(() => {
     setLocErr("");
 
     if (!("geolocation" in navigator)) {
@@ -428,9 +447,7 @@ export default function AttendanceApp() {
       return;
     }
 
-    const opts = { enableHighAccuracy: true, maximumAge: 0 };
-
-    navigator.geolocation.getCurrentPosition(
+    const id = navigator.geolocation.watchPosition(
       async (pos) => {
         const la = pos.coords.latitude;
         const ln = pos.coords.longitude;
@@ -440,10 +457,16 @@ export default function AttendanceApp() {
           setLng(ln);
         }
 
+        const reqId = Date.now();
+        lastGeoReqRef.current = reqId;
+
         try {
           const a = await reverseGeocode(la, ln);
+          // don't overwrite if a newer request already started
+          if (lastGeoReqRef.current !== reqId) return;
           if (!isLocationFrozen) setAddress(a);
         } catch {
+          if (lastGeoReqRef.current !== reqId) return;
           if (!isLocationFrozen) setAddress("");
         }
       },
@@ -452,17 +475,20 @@ export default function AttendanceApp() {
         else if (err.code === 2) setLocErr("Location unavailable (turn on GPS).");
         else setLocErr(err.message || "Location error");
       },
-      opts
+      {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 15000,
+      }
     );
-  };
 
-  useEffect(() => {
-    getLocation();
-  }, []);
+    return () => navigator.geolocation.clearWatch(id);
+  }, [isLocationFrozen]);
 
   const freezeLocationNow = async () => {
     setIsLocationFrozen(true);
 
+    // If we already have live coords, freeze immediately
     if (lat != null && lng != null) {
       setFrozenLat(lat);
       setFrozenLng(lng);
@@ -470,6 +496,7 @@ export default function AttendanceApp() {
       return;
     }
 
+    // fallback: one-shot
     await new Promise((resolve) => {
       if (!("geolocation" in navigator)) return resolve();
 
@@ -490,17 +517,20 @@ export default function AttendanceApp() {
           resolve();
         },
         () => resolve(),
-        { enableHighAccuracy: true, maximumAge: 0 }
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
       );
     });
   };
 
   /* -------------------- selfie -------------------- */
   const [selfieFile, setSelfieFile] = useState(null);
-  const selfiePreview = useMemo(() => {
-    if (!selfieFile) return "";
-    return URL.createObjectURL(selfieFile);
-  }, [selfieFile]);
+  const selfiePreview = useMemo(() => (selfieFile ? URL.createObjectURL(selfieFile) : ""), [selfieFile]);
+
+  useEffect(() => {
+    return () => {
+      if (selfiePreview) URL.revokeObjectURL(selfiePreview);
+    };
+  }, [selfiePreview]);
 
   /* -------------------- employees list by office (from ESPO) -------------------- */
   const filteredEmployees = useMemo(() => {
@@ -520,10 +550,7 @@ export default function AttendanceApp() {
       if (dateStr === "--") return;
 
       try {
-        const rec = await findTodayRecord({
-          employeeName: employeeId,
-          attendanceDate: dateStr,
-        });
+        const rec = await findTodayRecord({ employeeName: employeeId, attendanceDate: dateStr });
         if (cancelled) return;
         setLastAction(computeLastActionFromRecord(rec));
       } catch {
@@ -539,14 +566,14 @@ export default function AttendanceApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [officeId, employeeId, dateStr]);
 
-  /* -------------------- allowed actions rules -------------------- */
+  /* -------------------- allowed actions rules (1 record per employee per day) -------------------- */
   const allowedTypes = useMemo(() => {
     if (!officeId || !employeeId) return [];
     if (lastAction === null) return ["checkin"];
     if (lastAction === "checkin") return ["lunchStart", "checkout"];
     if (lastAction === "lunchStart") return ["lunchEnd", "checkout"];
     if (lastAction === "lunchEnd") return ["checkout"];
-    return [];
+    return []; // after checkout => day finished (no more checkin same date)
   }, [officeId, employeeId, lastAction]);
 
   useEffect(() => {
@@ -579,11 +606,10 @@ export default function AttendanceApp() {
     setLocErr("");
 
     await syncKolkataTime();
-    getLocation();
     await loadOrgFromEspo();
   };
 
-  /* -------------------- ✅ submit => POST or PUT to ESPO -------------------- */
+  /* -------------------- ✅ submit => POST or PUT to ESPO (+ selfie upload) -------------------- */
   const onSubmit = async () => {
     if (!ESPO_BASEURL) return openModal(COMPANY_NAME, "ESPO base URL missing in .env");
     if (!ESPO_API_KEY) return openModal(COMPANY_NAME, "ESPO API key missing in .env");
@@ -596,31 +622,23 @@ export default function AttendanceApp() {
     if (!selfieFile) return openModal(COMPANY_NAME, "Please take selfie.");
 
     const date = dateStr;
-    const dt = `${dateStr} ${timeStr}`; // Espo Date-Time format: "YYYY-MM-DD HH:mm:ss"
+    const dt = `${dateStr} ${timeStr}`; // "YYYY-MM-DD HH:mm:ss"
 
-    // map UI type -> ESPO field
     const fieldByType = {
       checkin: "checkInAt",
       checkout: "checkOutAt",
       lunchStart: "lunchOutAt",
       lunchEnd: "lunchInAt",
     };
-
     const timeField = fieldByType[type];
 
     try {
-      // 1) check existing record for (employeeName + attendanceDate)
-      const existing = await findTodayRecord({
-        employeeName: employeeId,
-        attendanceDate: date,
-      });
+      // 0) upload selfie first -> (id,name)
+      const uploaded = await espoUploadSelfie(selfieFile);
 
-      // payload common fields you asked:
-      // - name = employee name
-      // - officeCode = selected office
-      // - employeeName = selected employee
-      // - attendanceDate = date
-      // - officeLat/officeLng = captured lat/lng
+      // 1) check existing record for (employeeName + attendanceDate)
+      const existing = await findTodayRecord({ employeeName: employeeId, attendanceDate: date });
+
       const basePayload = {
         name: employeeId,
         officeCode: officeId,
@@ -628,13 +646,15 @@ export default function AttendanceApp() {
         attendanceDate: date,
         officeLat: Number(displayLat),
         officeLng: Number(displayLng),
-        // optional helpful unique day key (safe)
         daykey: `${date}__${employeeId}`.toLowerCase(),
         notes: displayAddress || "",
+
+        // ✅ store selfie in your File field columns
+        selfieImageId: uploaded.id,
+        selfieImageName: uploaded.name,
       };
 
       if (!existing) {
-        // new record: only allow checkin
         if (type !== "checkin") {
           return openModal(COMPANY_NAME, "First do Checkin for today, then Lunch/Checkout.");
         }
@@ -646,18 +666,14 @@ export default function AttendanceApp() {
         };
 
         const created = await espoCreate(createPayload);
+        setLastAction(computeLastActionFromRecord(created) || "checkin");
 
-        // update local flow based on server result if it returned
-        const newLast = computeLastActionFromRecord(created) || "checkin";
-        setLastAction(newLast);
-
+        setSelfieFile(null);
         openModal(COMPANY_NAME, `${COMPANY_NAME}: ${ACTION_LABELS[type]} submitted ✅`, true);
         return;
       }
 
-      // record exists: update only the selected field
-      const alreadyHas = Boolean(existing?.[timeField]);
-      if (alreadyHas) {
+      if (existing?.[timeField]) {
         return openModal(COMPANY_NAME, `${ACTION_LABELS[type]} already done for today.`);
       }
 
@@ -668,13 +684,10 @@ export default function AttendanceApp() {
 
       await espoUpdate(existing.id, updatePayload);
 
-      // fetch fresh record (so lastAction is accurate)
-      const fresh = await findTodayRecord({
-        employeeName: employeeId,
-        attendanceDate: date,
-      });
+      const fresh = await findTodayRecord({ employeeName: employeeId, attendanceDate: date });
       setLastAction(computeLastActionFromRecord(fresh));
 
+      setSelfieFile(null);
       openModal(COMPANY_NAME, `${COMPANY_NAME}: ${ACTION_LABELS[type]} submitted ✅`, true);
     } catch (e) {
       console.warn("[ESPO] submit failed:", e?.message || e);
@@ -721,8 +734,8 @@ export default function AttendanceApp() {
               setSelfieFile(null);
 
               if (val) {
-                // freeze time at selection
                 setIsTimeFrozen(true);
+
                 const trusted = getTrustedNow();
                 if (trusted) {
                   const { date, time } = istDateTimeParts(trusted);
@@ -733,10 +746,10 @@ export default function AttendanceApp() {
                   setTimeStr("--");
                 }
 
-                // freeze location
                 await freezeLocationNow();
               } else {
                 setIsTimeFrozen(false);
+
                 setIsLocationFrozen(false);
                 setFrozenLat(null);
                 setFrozenLng(null);
@@ -771,7 +784,6 @@ export default function AttendanceApp() {
               }}
             >
               <option value="">{filteredEmployees.length ? "Select Employee" : "No employees found"}</option>
-
               {filteredEmployees.map((e) => (
                 <option key={e.id} value={e.id}>
                   {e.name}

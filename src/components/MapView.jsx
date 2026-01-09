@@ -21,49 +21,57 @@ function distanceMeters(a, b) {
 }
 
 export default function MapView({ lat, lng }) {
-  // ✅ last stable coordinate used by the iframe
-  const [stable, setStable] = useState({ lat: 23.0225, lng: 72.5714 });
+  const DEFAULT = { lat: 23.0225, lng: 72.5714 };
 
-  // ✅ used to retry iframe load if stuck/blank
+  // last stable coordinate used by the iframe
+  const [stable, setStable] = useState(DEFAULT);
+
+  // force iframe reload when stable changes meaningfully
   const [reloadKey, setReloadKey] = useState(0);
 
-  // ✅ loading fallback (because sometimes iframe stays blank)
+  // loading fallback
   const [loading, setLoading] = useState(true);
   const loadTimerRef = useRef(null);
 
-  // Only update iframe coords if moved > X meters (prevents jitter reload)
-  const MOVE_THRESHOLD_METERS = 30;
+  // tweak this if you want smoother updates
+  const MOVE_THRESHOLD_METERS = 15;
 
   useEffect(() => {
-    if (typeof lat !== "number" || typeof lng !== "number") return;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
 
     const next = { lat, lng };
-    const moved = distanceMeters(stable, next);
 
-    // update only if big movement OR first real GPS after default
-    if (moved >= MOVE_THRESHOLD_METERS) {
-      setStable(next);
-    } else {
-      // still keep stable unchanged to avoid iframe reload
-      // but you still show latest lat/lng elsewhere in UI
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setStable((prev) => {
+      const moved = distanceMeters(prev, next);
+
+      // Always accept first real coord (prev may be DEFAULT)
+      const isDefault = prev.lat === DEFAULT.lat && prev.lng === DEFAULT.lng;
+
+      if (isDefault || moved >= MOVE_THRESHOLD_METERS) {
+        // also force iframe reload so it centers correctly
+        setReloadKey((k) => k + 1);
+        return next;
+      }
+      return prev;
+    });
   }, [lat, lng]);
 
+  // Better embed URL (more consistent centering than www.google.com/maps?q=)
   const src = useMemo(() => {
-    const la = stable.lat ?? 23.0225;
-    const ln = stable.lng ?? 72.5714;
-    return `https://www.google.com/maps?q=${la},${ln}&z=16&output=embed`;
-  }, [stable]);
+    const la = Number.isFinite(stable.lat) ? stable.lat : DEFAULT.lat;
+    const ln = Number.isFinite(stable.lng) ? stable.lng : DEFAULT.lng;
 
-  // Start a timer: if iframe doesn’t load in 6s, auto retry once
+    // `maps.google.com` embed behaves more predictably
+    return `https://maps.google.com/maps?hl=en&z=17&t=m&output=embed&q=${la},${ln}`;
+  }, [stable.lat, stable.lng]);
+
+  // if iframe doesn’t load in 6s, retry once
   useEffect(() => {
     setLoading(true);
 
     if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
 
     loadTimerRef.current = setTimeout(() => {
-      // if still loading, retry by forcing iframe remount
       setReloadKey((k) => k + 1);
     }, 6000);
 
@@ -73,9 +81,9 @@ export default function MapView({ lat, lng }) {
   }, [src]);
 
   const openInGoogleMaps = () => {
-    const la = stable.lat ?? 23.0225;
-    const ln = stable.lng ?? 72.5714;
-    window.open(`https://www.google.com/maps?q=${la},${ln}`, "_blank");
+    const la = Number.isFinite(stable.lat) ? stable.lat : DEFAULT.lat;
+    const ln = Number.isFinite(stable.lng) ? stable.lng : DEFAULT.lng;
+    window.open(`https://www.google.com/maps?q=${la},${ln}`, "_blank", "noopener,noreferrer");
   };
 
   return (
@@ -100,7 +108,7 @@ export default function MapView({ lat, lng }) {
       )}
 
       <iframe
-        key={reloadKey} // ✅ forces iframe to fully reload when needed
+        key={reloadKey}
         title="Google Map"
         src={src}
         width="100%"
@@ -112,7 +120,6 @@ export default function MapView({ lat, lng }) {
         onLoad={() => setLoading(false)}
       />
 
-      {/* Optional: tiny controls */}
       <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
         <button
           type="button"
