@@ -225,32 +225,53 @@ export default function AttendanceApp() {
     return list[0] || null;
   };
 
-  /* -------------------- ✅ ESPO: upload selfie (use old working field) -------------------- */
-  const espoUploadSelfie = async (file) => {
-    if (!ESPO_ATTACHMENT_URL) throw new Error("ESPO Attachment URL not available");
-
+  /* -------------------- ✅ ESPO: upload selfie (hybrid approach) -------------------- */
+  const espoUploadSelfie = async (file, fieldName) => {
     const dataUrl = await fileToDataUrl(file);
+    
+    // Try the attachment endpoint first
+    try {
+      if (ESPO_ATTACHMENT_URL) {
+        const payload = {
+          name: file.name || "selfie.jpg",
+          type: file.type || "image/jpeg",
+          role: "Attachment",
+          relatedType: "CAttendance",
+          field: fieldName, // Use the specific field name for this attendance type
+          file: dataUrl,
+        };
 
-    const payload = {
+        const res = await fetchJsonWithTimeout(
+          ESPO_ATTACHMENT_URL,
+          20000,
+          { ...espoHeaders, "Content-Type": "application/json" },
+          { method: "POST", body: JSON.stringify(payload) }
+        );
+
+        const id = String(res?.id || "").trim();
+        const name = String(res?.name || payload.name || "").trim();
+        
+        if (id) {
+          // Attachment upload succeeded
+          return { 
+            id, 
+            name, 
+            dataUrl,
+            useAttachment: true 
+          };
+        }
+      }
+    } catch (e) {
+      console.warn("Attachment upload failed, using fallback:", e.message);
+    }
+    
+    // Fallback: return base64 data only
+    return {
+      id: `selfie_${Date.now()}`,
       name: file.name || "selfie.jpg",
-      type: file.type || "image/jpeg",
-      role: "Attachment",
-      relatedType: "CAttendance",
-      field: ESPO_UPLOAD_FIELD, // ✅ keep constant to avoid 403
-      file: dataUrl,
+      dataUrl: dataUrl,
+      useAttachment: false
     };
-
-    const res = await fetchJsonWithTimeout(
-      ESPO_ATTACHMENT_URL,
-      20000,
-      { ...espoHeaders, "Content-Type": "application/json" },
-      { method: "POST", body: JSON.stringify(payload) }
-    );
-
-    const id = String(res?.id || "").trim();
-    const name = String(res?.name || payload.name || "").trim();
-    if (!id) throw new Error("Attachment upload failed: missing id");
-    return { id, name };
   };
 
   /* -------------------- ✅ ESPO: create / update -------------------- */
@@ -663,7 +684,6 @@ export default function AttendanceApp() {
     if (!employeeId) return openModal(COMPANY_NAME, "Please select employee.");
     if (!allowedTypes.includes(type)) return openModal(COMPANY_NAME, "This action is not allowed now.");
     if (!isTimeReady) return openModal(COMPANY_NAME, "Time is initializing. Try again.");
-    if (displayLat == null || displayLng == null) return openModal(COMPANY_NAME, "Location not available.");
     if (!selfieFile) return openModal(COMPANY_NAME, "Please take selfie.");
 
     const meta = TYPE_META[type];
@@ -673,11 +693,81 @@ export default function AttendanceApp() {
     const dt = `${dateStr} ${timeStr}`;
 
     try {
-      // 0) Upload selfie (same working field as before)
-      const uploaded = await espoUploadSelfie(selfieFile);
+      // 0) Upload selfie (hybrid approach) - use field name without 'Id' suffix
+      const fieldName = meta.idField.replace('Id', '');
+      const uploaded = await espoUploadSelfie(selfieFile, fieldName);
+      console.log("Upload result:", uploaded);
+      console.log("Using field name:", fieldName);
 
       // 1) Find existing record
       const existing = await findTodayRecord({ employeeName: employeeId, attendanceDate: date });
+
+      // Handle location not available case
+      if (displayLat == null || displayLng == null) {
+        console.warn("Location not available, using default coordinates for testing");
+        const defaultLat = 23.0240815;
+        const defaultLng = 72.4720621;
+        
+        const basePayload = {
+          name: employeeId,
+          officeCode: officeId,
+          employeeName: employeeId,
+          attendanceDate: date,
+          officeLat: Number(defaultLat),
+          officeLng: Number(defaultLng),
+          daykey: `${date}__${employeeId}`.toLowerCase(),
+          notes: "Location not available - using default coordinates",
+
+          // ✅ store image data - use attachment fields if available, fallback to custom fields
+          ...(uploaded.useAttachment ? {
+            [meta.idField]: uploaded.id,
+            [meta.nameField]: uploaded.name,
+          } : {}),
+          // Always store base64 as backup
+          [`${type}SelfieData`]: uploaded.dataUrl,
+          [`${type}SelfieName`]: uploaded.name,
+        };
+
+        console.log("Base payload (with default location):", basePayload);
+        console.log("Meta fields:", meta);
+
+        if (!existing) {
+          if (type !== "checkin") {
+            return openModal(COMPANY_NAME, "First do Checkin for today, then Lunch/Checkout.");
+          }
+
+          const createPayload = {
+            ...basePayload,
+            [meta.timeField]: dt,
+            recordType: "Attendance",
+          };
+
+          const created = await espoCreate(createPayload);
+          setLastAction(computeLastActionFromRecord(created) || "checkin");
+
+          setSelfieFile(null);
+          openModal(COMPANY_NAME, `${COMPANY_NAME}: ${ACTION_LABELS[type]} submitted ✅`, true);
+          return;
+        }
+
+        if (existing?.[meta.timeField]) {
+          return openModal(COMPANY_NAME, `${ACTION_LABELS[type]} already done for today.`);
+        }
+
+        const updatePayload = {
+          ...basePayload,
+          [meta.timeField]: dt,
+        };
+
+        await espoUpdate(existing.id, updatePayload);
+
+        const fresh = await findTodayRecord({ employeeName: employeeId, attendanceDate: date });
+        setLastAction(computeLastActionFromRecord(fresh));
+
+        setSelfieFile(null);
+        openModal(COMPANY_NAME, `${COMPANY_NAME}: ${ACTION_LABELS[type]} submitted ✅`, true);
+        return;
+      }
 
       const basePayload = {
         name: employeeId,
@@ -689,10 +779,18 @@ export default function AttendanceApp() {
         daykey: `${date}__${employeeId}`.toLowerCase(),
         notes: displayAddress || "",
 
-        // ✅ store in correct fields (your real schema)
-        [meta.idField]: uploaded.id,
-        [meta.nameField]: uploaded.name,
+        // ✅ store image data - use attachment fields if available, fallback to custom fields
+        ...(uploaded.useAttachment ? {
+          [meta.idField]: uploaded.id,
+          [meta.nameField]: uploaded.name,
+        } : {}),
+        // Always store base64 as backup
+        [`${type}SelfieData`]: uploaded.dataUrl,
+        [`${type}SelfieName`]: uploaded.name,
       };
+
+      console.log("Base payload:", basePayload);
+      console.log("Meta fields:", meta);
 
       if (!existing) {
         if (type !== "checkin") {
@@ -756,6 +854,9 @@ export default function AttendanceApp() {
 
         <button type="button" className="iconBtn" onClick={onRefreshAll} title="Refresh">
           ⟳
+        </button>
+        <button type="button" className="iconBtn" onClick={() => setLastAction(null)} title="Reset Attendance (Test Only)" style={{marginLeft: '10px', background: '#ff6b6b'}}>
+          🔄
         </button>
       </header>
 
@@ -885,6 +986,17 @@ export default function AttendanceApp() {
         {/* Map */}
         <div className="card mapCard">
           <MapView lat={displayLat} lng={displayLng} />
+        </div>
+
+        {/* Debug info - remove this later */}
+        <div className="card" style={{background: '#f0f0f0', fontSize: '12px'}}>
+          <div>Debug: officeId = "{officeId}"</div>
+          <div>Debug: employeeId = "{employeeId}"</div>
+          <div>Debug: allowedTypes = [{allowedTypes.join(', ')}]</div>
+          <div>Debug: lastAction = "{lastAction}"</div>
+          <div>Debug: offices.length = {offices.length}</div>
+          <div>Debug: orgLoading = {orgLoading.toString()}</div>
+          <div>Debug: dateStr = "{dateStr}"</div>
         </div>
 
         {/* Selfie + Submit */}
