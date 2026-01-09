@@ -855,9 +855,7 @@ export default function AttendanceApp() {
         <button type="button" className="iconBtn" onClick={onRefreshAll} title="Refresh">
           ⟳
         </button>
-        <button type="button" className="iconBtn" onClick={() => setLastAction(null)} title="Reset Attendance (Test Only)" style={{marginLeft: '10px', background: '#ff6b6b'}}>
-          🔄
-        </button>
+        
       </header>
 
       <div className="container">
