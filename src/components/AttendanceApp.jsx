@@ -989,15 +989,7 @@ export default function AttendanceApp() {
         </div>
 
         {/* Debug info - remove this later */}
-        <div className="card" style={{background: '#f0f0f0', fontSize: '12px'}}>
-          <div>Debug: officeId = "{officeId}"</div>
-          <div>Debug: employeeId = "{employeeId}"</div>
-          <div>Debug: allowedTypes = [{allowedTypes.join(', ')}]</div>
-          <div>Debug: lastAction = "{lastAction}"</div>
-          <div>Debug: offices.length = {offices.length}</div>
-          <div>Debug: orgLoading = {orgLoading.toString()}</div>
-          <div>Debug: dateStr = "{dateStr}"</div>
-        </div>
+        
 
         {/* Selfie + Submit */}
         {officeId && employeeId && allowedTypes.length > 0 && (
