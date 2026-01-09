@@ -31,9 +31,7 @@ async function reverseGeocode(lat, lng) {
   return data?.display_name || "";
 }
 
-/* -------------------- small helpers -------------------- */
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
+/* -------------------- fetch json with timeout -------------------- */
 async function fetchJsonWithTimeout(url, ms = 8000, headers = {}, init = {}) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
@@ -47,7 +45,7 @@ async function fetchJsonWithTimeout(url, ms = 8000, headers = {}, init = {}) {
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`HTTP ${res.status}${text ? ` — ${text}` : ""}`);
+      throw new Error(`HTTP ${res.status} @ ${url}${text ? ` — ${text}` : ""}`);
     }
 
     const ct = res.headers.get("content-type") || "";
@@ -71,7 +69,7 @@ async function fetchDateHeaderMsWithTimeout(url, ms = 8000, headers = {}) {
       cache: "no-store",
       signal: ctrl.signal,
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status} @ ${url}`);
     const dateHeader = res.headers.get("date");
     if (!dateHeader) throw new Error("Missing Date header");
     const msVal = new Date(dateHeader).getTime();
@@ -151,14 +149,14 @@ export default function AttendanceApp() {
   const [cameraOpen, setCameraOpen] = useState(false);
 
   /* -------------------- flow state -------------------- */
-  const [lastAction, setLastAction] = useState(null); // null | checkin | lunchStart | lunchEnd | checkout
+  const [lastAction, setLastAction] = useState(null);
 
   /* -------------------- freeze flags -------------------- */
   const [isTimeFrozen, setIsTimeFrozen] = useState(false);
   const [isLocationFrozen, setIsLocationFrozen] = useState(false);
 
-  /* -------------------- ✅ ESPO env (Vite needs VITE_) -------------------- */
-  const ESPO_BASEURL = (import.meta.env.VITE_ESPO_BASEURL || "").trim(); // https://espo.egport.com/api/v1/CAttendance
+  /* -------------------- ✅ ESPO env -------------------- */
+  const ESPO_BASEURL = (import.meta.env.VITE_ESPO_BASEURL || "").trim(); // .../api/v1/CAttendance
   const ESPO_API_KEY = (import.meta.env.VITE_X_API_KEY || "").trim();
 
   const espoHeaders = useMemo(() => ({ "X-Api-Key": ESPO_API_KEY }), [ESPO_API_KEY]);
@@ -169,7 +167,6 @@ export default function AttendanceApp() {
       const u = new URL(ESPO_BASEURL);
       u.search = "";
       u.hash = "";
-      // remove last path segment (CAttendance)
       u.pathname = u.pathname.replace(/\/[^/]+\/?$/, "");
       return u.toString().replace(/\/$/, "");
     } catch {
@@ -182,6 +179,17 @@ export default function AttendanceApp() {
     return `${ESPO_API_ROOT}/Attachment`;
   }, [ESPO_API_ROOT]);
 
+  // ✅ must be the SAME as your old working upload field name
+  const ESPO_UPLOAD_FIELD = "selfieImage";
+
+  /* -------------------- type meta (matches your actual fields) -------------------- */
+  const TYPE_META = {
+    checkin: { timeField: "checkInAt", idField: "checkInSelfieId", nameField: "checkInSelfieName" },
+    checkout: { timeField: "checkOutAt", idField: "checkOutSelfieId", nameField: "checkOutSelfieName" },
+    lunchStart: { timeField: "lunchOutAt", idField: "lunchOutSelfieId", nameField: "lunchOutSelfieName" },
+    lunchEnd: { timeField: "lunchInAt", idField: "lunchInSelfieId", nameField: "lunchInSelfieName" },
+  };
+
   const normalizeKey = (s) => String(s || "").trim().toLowerCase();
 
   const buildEspoQueryUrl = (base, paramsObj) => {
@@ -193,7 +201,7 @@ export default function AttendanceApp() {
     return u.toString();
   };
 
-  /* -------------------- ✅ ESPO: find today's record by employee+date -------------------- */
+  /* -------------------- ✅ ESPO: find today's record -------------------- */
   const findTodayRecord = async ({ employeeName, attendanceDate }) => {
     if (!ESPO_BASEURL) throw new Error("VITE_ESPO_BASEURL missing");
     if (!ESPO_API_KEY) throw new Error("VITE_X_API_KEY missing");
@@ -217,19 +225,19 @@ export default function AttendanceApp() {
     return list[0] || null;
   };
 
-  /* -------------------- ✅ ESPO: upload selfie to Attachment -------------------- */
+  /* -------------------- ✅ ESPO: upload selfie (use old working field) -------------------- */
   const espoUploadSelfie = async (file) => {
     if (!ESPO_ATTACHMENT_URL) throw new Error("ESPO Attachment URL not available");
+
     const dataUrl = await fileToDataUrl(file);
 
     const payload = {
       name: file.name || "selfie.jpg",
       type: file.type || "image/jpeg",
       role: "Attachment",
-      // For a File-type field on CAttendance
       relatedType: "CAttendance",
-      field: "selfieImage",
-      file: dataUrl, // "data:image/jpeg;base64,..."
+      field: ESPO_UPLOAD_FIELD, // ✅ keep constant to avoid 403
+      file: dataUrl,
     };
 
     const res = await fetchJsonWithTimeout(
@@ -274,7 +282,7 @@ export default function AttendanceApp() {
     return null;
   };
 
-  /* -------------------- ✅ offices + employees from ESPO (dynamic) -------------------- */
+  /* -------------------- ✅ offices + employees from ESPO -------------------- */
   const [offices, setOffices] = useState([]);
   const [employeesByOffice, setEmployeesByOffice] = useState({});
   const [orgLoading, setOrgLoading] = useState(true);
@@ -353,7 +361,7 @@ export default function AttendanceApp() {
     setModal({ open: true, title, message, refreshOnOk });
   const closeModal = () => setModal((m) => ({ ...m, open: false }));
 
-  /* -------------------- FAST IST TIME (instant + background sync) -------------------- */
+  /* -------------------- FAST IST TIME -------------------- */
   const [timeSync, setTimeSync] = useState({
     serverEpochMs: null,
     perfAtSync: null,
@@ -432,16 +440,12 @@ export default function AttendanceApp() {
     }
 
     console.warn("[IST] sync failed:", lastErr?.message || lastErr);
-    // keep UI running using fallback/cached time
   };
 
-  // ✅ Instant clock on first paint + cached sync + background real sync
   useEffect(() => {
-    // 1) show time immediately (device clock formatted to IST)
     renderClock(new Date());
     setIsTimeReady(true);
 
-    // 2) apply cached authoritative time instantly (if any)
     const cached = readCachedTimeSync();
     if (cached) {
       const elapsed = Date.now() - cached.savedAtMs;
@@ -449,20 +453,16 @@ export default function AttendanceApp() {
       setTimeSync({
         serverEpochMs: corrected,
         perfAtSync: performance.now(),
-        isAuthoritative: false, // until fresh sync succeeds
+        isAuthoritative: false,
       });
     }
 
-    // 3) background sync (fast timeout)
     syncKolkataTimeFast();
-
-    // 4) periodic background sync
     const t = setInterval(syncKolkataTimeFast, 5 * 60 * 1000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Tick every second (trusted if available, else device time)
   useEffect(() => {
     if (isTimeFrozen) return;
 
@@ -477,16 +477,13 @@ export default function AttendanceApp() {
     return () => clearInterval(t);
   }, [isTimeFrozen, timeSync]);
 
-  /* -------------------- location (LIVE) -------------------- */
+  /* -------------------- location -------------------- */
   const [lat, setLat] = useState(null);
   const [lng, setLng] = useState(null);
   const [address, setAddress] = useState("");
   const [locErr, setLocErr] = useState("");
-
-  // Keep last reverse-geocode request from overwriting newer coordinates
   const lastGeoReqRef = useRef(0);
 
-  /* -------------------- location (FROZEN) -------------------- */
   const [frozenLat, setFrozenLat] = useState(null);
   const [frozenLng, setFrozenLng] = useState(null);
   const [frozenAddress, setFrozenAddress] = useState("");
@@ -495,7 +492,6 @@ export default function AttendanceApp() {
   const displayLng = isLocationFrozen ? frozenLng : lng;
   const displayAddress = isLocationFrozen ? frozenAddress : address;
 
-  // ✅ More accurate: watchPosition (first fix may be wrong, then improves)
   useEffect(() => {
     setLocErr("");
 
@@ -531,11 +527,7 @@ export default function AttendanceApp() {
         else if (err.code === 2) setLocErr("Location unavailable (turn on GPS).");
         else setLocErr(err.message || "Location error");
       },
-      {
-        enableHighAccuracy: true,
-        maximumAge: 0,
-        timeout: 15000,
-      }
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
     );
 
     return () => navigator.geolocation.clearWatch(id);
@@ -544,7 +536,6 @@ export default function AttendanceApp() {
   const freezeLocationNow = async () => {
     setIsLocationFrozen(true);
 
-    // If we already have live coords, freeze immediately
     if (lat != null && lng != null) {
       setFrozenLat(lat);
       setFrozenLng(lng);
@@ -552,7 +543,6 @@ export default function AttendanceApp() {
       return;
     }
 
-    // fallback: one-shot
     await new Promise((resolve) => {
       if (!("geolocation" in navigator)) return resolve();
 
@@ -588,13 +578,13 @@ export default function AttendanceApp() {
     };
   }, [selfiePreview]);
 
-  /* -------------------- employees list by office (from ESPO) -------------------- */
+  /* -------------------- employees list by office -------------------- */
   const filteredEmployees = useMemo(() => {
     if (!officeId) return [];
     return Array.isArray(employeesByOffice?.[officeId]) ? employeesByOffice[officeId] : [];
   }, [officeId, employeesByOffice]);
 
-  /* -------------------- ✅ pull today's state from server when office+employee selected -------------------- */
+  /* -------------------- pull today's state -------------------- */
   useEffect(() => {
     let cancelled = false;
 
@@ -622,7 +612,7 @@ export default function AttendanceApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [officeId, employeeId, dateStr]);
 
-  /* -------------------- allowed actions rules (1 record per employee per day) -------------------- */
+  /* -------------------- allowed actions rules -------------------- */
   const allowedTypes = useMemo(() => {
     if (!officeId || !employeeId) return [];
     if (lastAction === null) return ["checkin"];
@@ -648,8 +638,7 @@ export default function AttendanceApp() {
     setSelfieFile(null);
 
     setIsTimeFrozen(false);
-    renderClock(new Date()); // show instantly
-    // background sync again
+    renderClock(new Date());
     syncKolkataTimeFast();
 
     setIsLocationFrozen(false);
@@ -665,7 +654,7 @@ export default function AttendanceApp() {
     await loadOrgFromEspo();
   };
 
-  /* -------------------- ✅ submit => POST or PUT to ESPO (+ selfie upload) -------------------- */
+  /* -------------------- submit -------------------- */
   const onSubmit = async () => {
     if (!ESPO_BASEURL) return openModal(COMPANY_NAME, "ESPO base URL missing in .env");
     if (!ESPO_API_KEY) return openModal(COMPANY_NAME, "ESPO API key missing in .env");
@@ -677,22 +666,17 @@ export default function AttendanceApp() {
     if (displayLat == null || displayLng == null) return openModal(COMPANY_NAME, "Location not available.");
     if (!selfieFile) return openModal(COMPANY_NAME, "Please take selfie.");
 
-    const date = dateStr;
-    const dt = `${dateStr} ${timeStr}`; // "YYYY-MM-DD HH:mm:ss"
+    const meta = TYPE_META[type];
+    if (!meta) return openModal(COMPANY_NAME, "Invalid attendance type.");
 
-    const fieldByType = {
-      checkin: "checkInAt",
-      checkout: "checkOutAt",
-      lunchStart: "lunchOutAt",
-      lunchEnd: "lunchInAt",
-    };
-    const timeField = fieldByType[type];
+    const date = dateStr;
+    const dt = `${dateStr} ${timeStr}`;
 
     try {
-      // 0) upload selfie first -> (id,name)
+      // 0) Upload selfie (same working field as before)
       const uploaded = await espoUploadSelfie(selfieFile);
 
-      // 1) check existing record for (employeeName + attendanceDate)
+      // 1) Find existing record
       const existing = await findTodayRecord({ employeeName: employeeId, attendanceDate: date });
 
       const basePayload = {
@@ -705,8 +689,9 @@ export default function AttendanceApp() {
         daykey: `${date}__${employeeId}`.toLowerCase(),
         notes: displayAddress || "",
 
-        selfieImageId: uploaded.id,
-        selfieImageName: uploaded.name,
+        // ✅ store in correct fields (your real schema)
+        [meta.idField]: uploaded.id,
+        [meta.nameField]: uploaded.name,
       };
 
       if (!existing) {
@@ -716,7 +701,7 @@ export default function AttendanceApp() {
 
         const createPayload = {
           ...basePayload,
-          checkInAt: dt,
+          [meta.timeField]: dt,
           recordType: "Attendance",
         };
 
@@ -728,13 +713,13 @@ export default function AttendanceApp() {
         return;
       }
 
-      if (existing?.[timeField]) {
+      if (existing?.[meta.timeField]) {
         return openModal(COMPANY_NAME, `${ACTION_LABELS[type]} already done for today.`);
       }
 
       const updatePayload = {
         ...basePayload,
-        [timeField]: dt,
+        [meta.timeField]: dt,
       };
 
       await espoUpdate(existing.id, updatePayload);
@@ -755,6 +740,9 @@ export default function AttendanceApp() {
     closeModal();
     if (shouldRefresh) await onRefreshAll();
   };
+
+  const cameraTitle = `Take Selfie (${ACTION_LABELS[type] || "Selfie"})`;
+  const fileNamePrefix = `selfie-${type}`;
 
   return (
     <div className="page">
@@ -797,7 +785,6 @@ export default function AttendanceApp() {
                   setDateStr(date);
                   setTimeStr(time);
                 } else {
-                  // still show instantly using device time in IST format
                   const { date, time } = istDateTimeParts(new Date());
                   setDateStr(date);
                   setTimeStr(time);
@@ -907,10 +894,20 @@ export default function AttendanceApp() {
               📷 Take Selfie
             </button>
 
-            <SelfieCamera open={cameraOpen} onClose={() => setCameraOpen(false)} onCapture={(file) => setSelfieFile(file)} />
+            <SelfieCamera
+              open={cameraOpen}
+              onClose={() => setCameraOpen(false)}
+              onCapture={(file) => setSelfieFile(file)}
+              title={cameraTitle}
+              fileNamePrefix={fileNamePrefix}
+            />
 
             <div className="previewBox">
-              {selfiePreview ? <img className="previewImg" src={selfiePreview} alt="Selfie Preview" /> : <div className="placeholder">Selfie Preview</div>}
+              {selfiePreview ? (
+                <img className="previewImg" src={selfiePreview} alt="Selfie Preview" />
+              ) : (
+                <div className="placeholder">Selfie Preview</div>
+              )}
             </div>
 
             <button className="btn green" onClick={onSubmit}>

@@ -1,6 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 
-export default function SelfieCamera({ open, onClose, onCapture }) {
+export default function SelfieCamera({
+  open,
+  onClose,
+  onCapture,
+  title = "Take Selfie",
+  fileNamePrefix = "selfie",
+}) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
 
@@ -42,8 +48,6 @@ export default function SelfieCamera({ open, onClose, onCapture }) {
       const video = videoRef.current;
       if (video) {
         video.srcObject = stream;
-
-        // iOS needs playsInline + sometimes explicit play
         await video.play();
       }
     } catch (e) {
@@ -60,9 +64,7 @@ export default function SelfieCamera({ open, onClose, onCapture }) {
     }
     startCamera(facingMode);
 
-    return () => {
-      stopStream();
-    };
+    return () => stopStream();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -77,7 +79,6 @@ export default function SelfieCamera({ open, onClose, onCapture }) {
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
-
     if (!video || !canvas) return;
 
     const w = video.videoWidth || 720;
@@ -96,8 +97,12 @@ export default function SelfieCamera({ open, onClose, onCapture }) {
           return;
         }
 
-        // Convert blob to File (so you can upload easily)
-        const file = new File([blob], `selfie-${Date.now()}.jpg`, {
+        const safePrefix = String(fileNamePrefix || "selfie")
+          .trim()
+          .toLowerCase()
+          .replace(/\s+/g, "-");
+
+        const file = new File([blob], `${safePrefix}-${Date.now()}.jpg`, {
           type: "image/jpeg",
         });
 
@@ -115,7 +120,7 @@ export default function SelfieCamera({ open, onClose, onCapture }) {
     <div className="camOverlay">
       <div className="camModal">
         <div className="camHeader">
-          <div className="camTitle">Take Selfie</div>
+          <div className="camTitle">{title}</div>
           <button className="camX" onClick={onClose} type="button">
             ✕
           </button>
