@@ -291,13 +291,25 @@ export default function AttendanceApp() {
   };
 
   const espoUpdate = async (id, payload) => {
+    if (!id) throw new Error("Record ID is required for update");
     const url = `${ESPO_BASEURL.replace(/\/$/, "")}/${encodeURIComponent(id)}`;
-    return await fetchJsonWithTimeout(
-      url,
-      20000,
-      { ...espoHeaders, "Content-Type": "application/json" },
-      { method: "PUT", body: JSON.stringify(payload) }
-    );
+    
+    console.log("[ESPO UPDATE] URL:", url);
+    console.log("[ESPO UPDATE] Payload:", JSON.stringify(payload, null, 2));
+    
+    try {
+      const result = await fetchJsonWithTimeout(
+        url,
+        20000,
+        { ...espoHeaders, "Content-Type": "application/json" },
+        { method: "PUT", body: JSON.stringify(payload) }
+      );
+      console.log("[ESPO UPDATE] Success:", result);
+      return result;
+    } catch (error) {
+      console.error("[ESPO UPDATE] Failed:", error);
+      throw error;
+    }
   };
 
   const computeLastActionFromRecord = (rec) => {
@@ -765,14 +777,39 @@ export default function AttendanceApp() {
           return openModal(COMPANY_NAME, `${ACTION_LABELS[type]} already done for today.`);
         }
 
+        // Build update payload with existing data + new fields
         const updatePayload = {
-          ...basePayload,
-          [meta.timeField]: dtUtc, // ✅ UTC value stored
+          // Keep existing core fields
+          name: existing.name,
+          officeCode: existing.officeCode,
+          employeeName: existing.employeeName,
+          attendanceDate: existing.attendanceDate,
+          daykey: existing.daykey,
+          
+          // Update the specific time field
+          [meta.timeField]: dtUtc,
         };
 
-        await espoUpdate(existing.id, updatePayload);
+        // Add selfie attachment if available
+        if (uploaded.useAttachment) {
+          updatePayload[meta.idField] = uploaded.id;
+          updatePayload[meta.nameField] = uploaded.name;
+        }
+
+        console.log("[SUBMIT] Updating existing record (no location):", existing.id);
+        console.log("[SUBMIT] Update payload:", JSON.stringify(updatePayload, null, 2));
+
+        const updateResult = await espoUpdate(existing.id, updatePayload);
+        console.log("[SUBMIT] Update result:", updateResult);
 
         const fresh = await findTodayRecord({ employeeName: employeeId, attendanceDate: date });
+        console.log("[SUBMIT] Fresh record after update:", fresh);
+        
+        // ✅ Verify the update actually worked
+        if (!fresh?.[meta.timeField]) {
+          throw new Error(`Update failed: ${meta.timeField} is still null in database. This may be a backend permission or field configuration issue in ESPO.`);
+        }
+        
         setLastAction(computeLastActionFromRecord(fresh));
 
         setSelfieFile(null);
@@ -824,14 +861,39 @@ export default function AttendanceApp() {
         return openModal(COMPANY_NAME, `${ACTION_LABELS[type]} already done for today.`);
       }
 
+      // Build update payload with existing data + new fields
       const updatePayload = {
-        ...basePayload,
-        [meta.timeField]: dtUtc, // ✅ UTC value stored
+        // Keep existing core fields
+        name: existing.name,
+        officeCode: existing.officeCode,
+        employeeName: existing.employeeName,
+        attendanceDate: existing.attendanceDate,
+        daykey: existing.daykey,
+        
+        // Update the specific time field
+        [meta.timeField]: dtUtc,
       };
 
-      await espoUpdate(existing.id, updatePayload);
+      // Add selfie attachment if available
+      if (uploaded.useAttachment) {
+        updatePayload[meta.idField] = uploaded.id;
+        updatePayload[meta.nameField] = uploaded.name;
+      }
+
+      console.log("[SUBMIT] Updating existing record:", existing.id);
+      console.log("[SUBMIT] Update payload:", JSON.stringify(updatePayload, null, 2));
+
+      const updateResult = await espoUpdate(existing.id, updatePayload);
+      console.log("[SUBMIT] Update result:", updateResult);
 
       const fresh = await findTodayRecord({ employeeName: employeeId, attendanceDate: date });
+      console.log("[SUBMIT] Fresh record after update:", fresh);
+      
+      // ✅ Verify the update actually worked
+      if (!fresh?.[meta.timeField]) {
+        throw new Error(`Update failed: ${meta.timeField} is still null in database. This may be a backend permission or field configuration issue in ESPO.`);
+      }
+      
       setLastAction(computeLastActionFromRecord(fresh));
 
       setSelfieFile(null);
